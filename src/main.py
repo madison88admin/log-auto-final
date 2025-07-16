@@ -9,6 +9,7 @@ import io
 import re
 from typing import List
 import json
+from openpyxl.styles import Alignment, Font, PatternFill
 
 app = FastAPI()
 
@@ -55,7 +56,14 @@ def normalize_header(header):
 def extract_tables(file_bytes):
     xls = pd.ExcelFile(file_bytes)
     tables = []
-    main_data_fields = ['caseNos', 'color', 'unitsCrt', 'totalUnit', 'totalQty', 'carton', 's4Material', 'materialNo']
+    # Updated main_data_fields to match the main table headers
+    main_data_fields = [
+        'cartonNo', 'color', 's4Material', 'materialNo',
+        'OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL',
+        'unitsCrt', 'totalUnit', 'totalNw', 'totalGw',
+        'carton', 'Length', 'Width', 'Height',
+        'cbm', 'totalCbm'
+    ]
     for sheet_name in xls.sheet_names:
         df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None, dtype=str)
         header_indices = [i for i, row in df_raw.iterrows() if str(row.iloc[0]).strip() == "CASE NOS" or str(row.iloc[0]).strip() == "Carton#"]
@@ -75,6 +83,13 @@ def extract_tables(file_bytes):
                 if all((cell is None or str(cell).strip() == "" or str(cell).lower() == "nan") for cell in data_row):
                     continue
                 row_dict = {mapped_keys[i]: data_row[i] if i < len(data_row) else "" for i in range(len(header_row))}
+                # Assign Length, Width, Height from R, S, T columns (Excel columns 18, 19, 20; Python indices 17, 18, 19)
+                if len(data_row) > 17:
+                    row_dict['Length'] = data_row[17]
+                if len(data_row) > 18:
+                    row_dict['Width'] = data_row[18]
+                if len(data_row) > 19:
+                    row_dict['Height'] = data_row[19]
                 # Only include rows with at least one main data field filled
                 if any(str(row_dict.get(f, '')).strip() not in ['', 'nan', 'None'] for f in main_data_fields):
                     table_data.append(row_dict)
@@ -118,10 +133,14 @@ def fill_template_with_data(ws, rows, group_name):
         return
     # Fill header fields (adjust cell addresses as needed)
     first_row = rows[0]
-    po_no = first_row.get('sa4PoNo', '')
-    ws['D14'] = po_no
-    ws['E14'] = f"{po_no} / {po_no}"
-    ws['D16'] = po_no
+    s4_hana_sku = str(first_row.get('s4Material', '') or first_row.get('E', ''))
+    po_line_value = s4_hana_sku[:-2] if len(s4_hana_sku) > 2 else s4_hana_sku
+    # Set PO-Line (D14) and Model # (D16) to trimmed S4 HANA SKU
+    ws['D14'] = po_line_value
+    ws['D16'] = po_line_value
+    # Set SAP PO# (E14) and PO NO# to sheet name
+    ws['E14'] = group_name
+    # Model Name (E16) remains as before
     ws['E16'] = first_row.get('modelName', group_name)
     ws['E7'] = ''
 
@@ -151,21 +170,40 @@ def fill_template_with_data(ws, rows, group_name):
         ws.cell(row=row_num, column=18, value=row.get('Length', ''))    # R: Length
         ws.cell(row=row_num, column=19, value=row.get('Width', ''))     # S: Width
         ws.cell(row=row_num, column=20, value=row.get('Height', ''))    # T: Height
-        ws.cell(row=row_num, column=21, value=safe_float(row.get('totalCbm', 0)))  # U: TOTAL CBM
+        cbm_value = safe_float(row.get('cbm', row.get('totalCbm', 0)))
+        ws.cell(row=row_num, column=21, value=cbm_value)  # U: CBM
+        ws.cell(row=row_num, column=22, value=cbm_value)  # V: TOTAL CBM
 
-    # Place summary after last data row
-    summary_row = main_table_start + num_data_rows + 1
-    ws.cell(row=summary_row, column=4, value='Summary')
-    ws.cell(row=summary_row+1, column=4, value='Total Carton')
-    ws.cell(row=summary_row+1, column=5, value=num_data_rows)
-    ws.cell(row=summary_row+2, column=4, value='Total Net Weight')
-    ws.cell(row=summary_row+2, column=5, value=sum(safe_float(row.get('totalNw', 0)) for row in rows))
-    ws.cell(row=summary_row+3, column=4, value='Total Gross Weight')
-    ws.cell(row=summary_row+3, column=5, value=sum(safe_float(row.get('totalGw', 0)) for row in rows))
-    ws.cell(row=summary_row+4, column=4, value='Total CBM')
-    ws.cell(row=summary_row+4, column=5, value=sum(safe_float(row.get('totalCbm', 0)) for row in rows))
+    # Place summary and color breakdown headers on the same row after the main table, with a gap
+    gap = 1
+    header_row = main_table_start + num_data_rows + gap + 1
+    summary_col = 4  # D
+    value_col = 5    # E
+    color_breakdown_col = 6  # F
 
-    # Color breakdown table (starts at column F)
+    # Merge and style the summary header (D/E)
+    ws.merge_cells(start_row=header_row, start_column=summary_col, end_row=header_row, end_column=value_col)
+    header_cell = ws.cell(row=header_row, column=summary_col)
+    header_cell.value = 'Summary'
+    header_cell.alignment = Alignment(horizontal='center', vertical='center')
+    header_cell.font = Font(bold=True)
+    header_cell.fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+
+    # (Assume color breakdown headers are present in the template at header_row, columns F onward)
+
+    # Write summary values (labels and values) below the summary header
+    ws.cell(row=header_row+1, column=summary_col, value='Total Carton')
+    ws.cell(row=header_row+1, column=value_col, value=num_data_rows)
+    ws.cell(row=header_row+2, column=summary_col, value='Total Net Weight (kg)')
+    ws.cell(row=header_row+2, column=value_col, value=round(sum(safe_float(row.get('totalNw', 0)) for row in rows), 3))
+    ws.cell(row=header_row+3, column=summary_col, value='Total Gross Weight (kg)')
+    ws.cell(row=header_row+3, column=value_col, value=round(sum(safe_float(row.get('totalGw', 0)) for row in rows), 3))
+    ws.cell(row=header_row+4, column=summary_col, value='Total CBM')
+    ws.cell(row=header_row+4, column=value_col, value=round(sum(safe_float(row.get('cbm', row.get('totalCbm', 0))) for row in rows), 3))
+
+    # Write color breakdown data below the color breakdown headers
+    color_breakdown_data_row = header_row + 1
+    # Calculate color_size_counts before using it
     color_size_counts = {}
     for row in rows:
         color = row.get('color', '')
@@ -175,27 +213,21 @@ def fill_template_with_data(ws, rows, group_name):
             color_size_counts[color] = {size: 0 for size in size_names}
         for size in size_names:
             color_size_counts[color][size] += safe_float(row.get(size, 0))
-    color_breakdown_row = summary_row + 7
-    color_breakdown_col = 6  # Column F
-    # Write headers
-    ws.cell(row=color_breakdown_row, column=color_breakdown_col, value='Colour')
-    for j, size in enumerate(size_names):
-        ws.cell(row=color_breakdown_row, column=color_breakdown_col + 1 + j, value=size)
-    ws.cell(row=color_breakdown_row, column=color_breakdown_col + 1 + len(size_names), value='Total')
-    # Write color breakdown data
+
     for i, (color, size_dict) in enumerate(color_size_counts.items()):
-        ws.cell(row=color_breakdown_row + 1 + i, column=color_breakdown_col, value=color)
+        ws.cell(row=color_breakdown_data_row + i, column=color_breakdown_col, value=color)
         total = 0
         for j, size in enumerate(size_names):
             val = size_dict[size]
-            ws.cell(row=color_breakdown_row + 1 + i, column=color_breakdown_col + 1 + j, value=val)
+            ws.cell(row=color_breakdown_data_row + i, column=color_breakdown_col + 1 + j, value=val)
             total += val
-        ws.cell(row=color_breakdown_row + 1 + i, column=color_breakdown_col + 1 + len(size_names), value=total)
-    # Write total row
-    ws.cell(row=color_breakdown_row + 1 + len(color_size_counts), column=color_breakdown_col, value='Total')
+        ws.cell(row=color_breakdown_data_row + i, column=color_breakdown_col + 1 + len(size_names), value=total)
+
+    # Write total row for color breakdown
+    ws.cell(row=color_breakdown_data_row + len(color_size_counts), column=color_breakdown_col, value='Total')
     for j, size in enumerate(size_names):
-        ws.cell(row=color_breakdown_row + 1 + len(color_size_counts), column=color_breakdown_col + 1 + j, value=sum(size_dict[size] for size_dict in color_size_counts.values()))
-    ws.cell(row=color_breakdown_row + 1 + len(color_size_counts), column=color_breakdown_col + 1 + len(size_names), value=sum(sum(size_dict[size] for size in size_names) for size_dict in color_size_counts.values()))
+        ws.cell(row=color_breakdown_data_row + len(color_size_counts), column=color_breakdown_col + 1 + j, value=sum(size_dict[size] for size_dict in color_size_counts.values()))
+    ws.cell(row=color_breakdown_data_row + len(color_size_counts), column=color_breakdown_col + 1 + len(size_names), value=sum(sum(size_dict[size] for size in size_names) for size_dict in color_size_counts.values()))
 
 # In generate_reports, skip NaN/Unknown group keys
 @app.post("/generate-reports/")

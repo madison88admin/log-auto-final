@@ -70,7 +70,6 @@ function App() {
         const idxPoNo = headerRow.indexOf('SA4 PO NO#');
         const idxS4Material = headerRow.indexOf('S4 Material');
         const idxECCMaterial = headerRow.indexOf('Material No#');
-        const idxUnitsCrt = headerRow.indexOf('QTY / CARTON'); // G
         const idxTotalUnit = headerRow.indexOf('TOTAL QTY');    // O
         const idxTotalNw = headerRow.indexOf('TOTAL N.W.');     // P
         const idxTotalGw = headerRow.indexOf('TOTAL G.W.');     // Q
@@ -83,11 +82,6 @@ function App() {
         // Helper to safely get a value
         const safe = (row: any[], idx: number) => (idx >= 0 && row && row[idx] !== undefined ? row[idx] : '');
 
-        // Fill header fields
-        const poNo = safe(dataRows[0], idxPoNo);
-        ws.getCell('D14').value = poNo; // PO-Line
-        ws.getCell('E14').value = `${poNo} / ${poNo}`; // SAP PO#
-        ws.getCell('D16').value = poNo; // Model #
         // Model Name logic: find the first CASE NOS cell, get 2 rows above
         let modelName = '';
         for (let i = 0; i < table.length; i++) {
@@ -100,10 +94,16 @@ function App() {
         if (parsedTables[t]?.modelName) {
           modelName = parsedTables[t].modelName;
         }
+        // Get S4 HANA SKU and trim last 2 digits
+        const firstS4HanaSKU = safe(dataRows[0], idxS4Material)?.toString() || '';
+        const poLineValue = firstS4HanaSKU.length > 2 ? firstS4HanaSKU.slice(0, -2) : firstS4HanaSKU;
+        // Set PO-Line (D14) and Model # (D16) to trimmed S4 HANA SKU
+        ws.getCell('D14').value = poLineValue;
+        ws.getCell('D16').value = poLineValue;
+        // Set SAP PO# (E14) to sheet name
+        ws.getCell('E14').value = sheetName;
+        // Model Name (E16) remains as before
         ws.getCell('E16').value = modelName;
-        // Remove setting E10 to the model name
-        // ws.getCell('E10').value = modelName;
-        // Clear E7 to prevent extra model name
         ws.getCell('E7').value = '';
 
         // --- DYNAMIC MAIN TABLE ROWS AT C20 ---
@@ -134,6 +134,17 @@ function App() {
         let prevS4SKU = '';
         let prevECC = '';
 
+        console.log('Header Row:', headerRow);
+        function findHeaderIndex(headerRow: any[], search: string) {
+          return headerRow.findIndex((h: any) =>
+            h && h.toString().replace(/[^a-zA-Z0-9]/g, '').toLowerCase().includes(search)
+          );
+        }
+        const idxUnitsCrt = findHeaderIndex(headerRow, 'qtycarton');
+        const idxCarton = findHeaderIndex(headerRow, 'carton');
+        const idxMeasCm = findHeaderIndex(headerRow, 'meascm');
+        console.log('idxUnitsCrt:', idxUnitsCrt, 'idxCarton:', idxCarton, 'idxMeasCm:', idxMeasCm);
+
         dataRows.forEach((row, i) => {
           const rowNum = mainTableStart + i;
           ws.getCell(`C${rowNum}`).value = safe(row, idxCaseNos); // Carton #
@@ -162,47 +173,19 @@ function App() {
               ws.getCell(String.fromCharCode(71 + j) + rowNum).value = safe(row, idx);
             }
           });
-          let rawO = safe(row, idxTotalUnit);
-          let rawN = safe(row, 10); // Get N value from the data row, not from worksheet
-          let valO = rawO !== undefined && rawO !== null && rawO !== '' ? parseFloat(rawO) : null;
-          let valN = rawN !== undefined && rawN !== null && rawN !== '' ? parseFloat(rawN) : null;
 
-          // Calculate column G (O divided by N)
-          console.log(`Row ${rowNum}: rawO=${rawO}, rawN=${rawN}, valO=${valO}, valN=${valN}`);
-          
-          if (valO && valN && valN !== 0) {
-            const gValue = valO / valN;
-            ws.getCell(`G${rowNum}`).value = gValue;
-            ws.getCell(`O${rowNum}`).value = valO;
-            ws.getCell(`N${rowNum}`).value = valN;
-            console.log(`Row ${rowNum}: Column G calculated = ${gValue}`);
-          } else {
-            // If either O or N is 0/blank, set G to blank and copy from above if available
-            if (rowNum > mainTableStart) {
-              const prevGValue = ws.getCell(`G${rowNum - 1}`).value;
-              ws.getCell(`G${rowNum}`).value = prevGValue || '';
-              console.log(`Row ${rowNum}: Column G copied from above = ${prevGValue}`);
-            } else {
-              ws.getCell(`G${rowNum}`).value = '';
-              console.log(`Row ${rowNum}: Column G set to blank (first row)`);
-            }
-            ws.getCell(`O${rowNum}`).value = '';
-            ws.getCell(`N${rowNum}`).value = '';
-            valO = null;
-            valN = null;
-          }
-
-          // Set N and O values (these were being overwritten later anyway)
-          ws.getCell(`N${rowNum}`).value = valN || safe(row, 10);
-          ws.getCell(`O${rowNum}`).value = valO || parseFloat(safe(row, idxTotalUnit)) || 0;
-          ws.getCell(`G${rowNum}`).value = safe(row, idxUnitsCrt);      // G: Units/CRT
-          ws.getCell(`P${rowNum}`).value = safe(row, idxTotalNw);       // P: TOTAL N.W.
-          ws.getCell(`Q${rowNum}`).value = safe(row, idxTotalGw);       // Q: TOTAL G.W.
-          ws.getCell(`U${rowNum}`).value = safe(row, idxTotalCbm);      // U: TOTAL CBM
-          ws.getCell(`V${rowNum}`).value = safe(row, idxTotalCbm);      // V: TOTAL CBM (if needed)
-          ws.getCell(`R${rowNum}`).value = safe(row, idxLength);   // R: Length
-          ws.getCell(`S${rowNum}`).value = safe(row, idxWidth);    // S: Width
-          ws.getCell(`T${rowNum}`).value = safe(row, idxHeight);   // T: Height
+          // Map report columns to uploaded file columns by letter
+          // A=0, B=1, ..., L=11, M=12, N=13, O=14, P=15, Q=16, R=17, S=18, T=19, U=20
+          ws.getCell(`G${rowNum}`).value = safe(row, 11); // G = L
+          ws.getCell(`N${rowNum}`).value = safe(row, 10); // N = K
+          ws.getCell(`O${rowNum}`).value = safe(row, 12); // O = M
+          ws.getCell(`P${rowNum}`).value = safe(row, 14); // P = O
+          ws.getCell(`Q${rowNum}`).value = safe(row, 16); // Q = Q
+          ws.getCell(`R${rowNum}`).value = safe(row, 17); // R = R
+          ws.getCell(`S${rowNum}`).value = safe(row, 18); // S = S
+          ws.getCell(`T${rowNum}`).value = safe(row, 19); // T = T
+          ws.getCell(`U${rowNum}`).value = safe(row, 20); // U = U
+          ws.getCell(`V${rowNum}`).value = safe(row, 20); // V = U
         });
 
         
@@ -225,11 +208,21 @@ function App() {
         console.log(`Last Carton# entry: "${lastCartonEntry}" -> Processed value: "${processedCartonValue}"`);
 
         // Write summary titles in D, values in E
+        // Calculate summary values from the report columns
+        let totalNetWeight = 0;
+        let totalGrossWeight = 0;
+        let totalCBM = 0;
+        for (let i = 0; i < numDataRows; i++) {
+          const rowNum = mainTableStart + i;
+          totalNetWeight += parseFloat(ws.getCell(`P${rowNum}`).value as string) || 0;
+          totalGrossWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
+          totalCBM += parseFloat(ws.getCell(`V${rowNum}`).value as string) || 0;
+        }
         const summaryData = [
           { title: 'Total Carton', value: processedCartonValue },
-          { title: 'Total Net Weight', value: dataRows.reduce((acc, row) => acc + (parseFloat(safe(row, idxTotalNw)) || 0), 0) },
-          { title: 'Total Gross Weight', value: dataRows.reduce((acc, row) => acc + (parseFloat(safe(row, idxTotalGw)) || 0), 0) },
-          { title: 'Total CBM', value: parseFloat(dataRows.reduce((acc, row) => acc + (parseFloat(safe(row, idxTotalCbm)) || 0), 0).toFixed(3)) }
+          { title: 'Total Net Weight', value: totalNetWeight },
+          { title: 'Total Gross Weight', value: totalGrossWeight },
+          { title: 'Total CBM', value: parseFloat(totalCBM.toFixed(3)) }
         ];
         summaryData.forEach((item, i) => {
           ws.getCell(`D${summaryStartRow + 1 + i}`).value = item.title;
