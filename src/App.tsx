@@ -1,0 +1,638 @@
+import { useState } from 'react';
+import { FileUpload } from './components/FileUpload';
+import { ProcessingStatus } from './components/ProcessingStatus';
+import { ReportResults } from './components/ReportResults';
+import { ValidationResults } from './components/ValidationResults';
+import { StrictValidationResults } from './components/StrictValidationResults';
+import { ExcelHandsontablePreview } from './components/ExcelHandsontablePreview';
+import { Header } from './components/Header';
+import { ProcessingResult } from './types';
+import ExcelJS from 'exceljs';
+import LuckysheetPreview from './components/LuckysheetPreview';
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
+
+function App() {
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [generatedExcelBuffer, setGeneratedExcelBuffer] = useState<ArrayBuffer | null>(null);
+  const [parsedTables, setParsedTables] = useState<{ table: any[][], modelName: string }[]>([]);
+  const [selectedTableIdx, setSelectedTableIdx] = useState(0);
+  // Add state to store all generated report buffers
+  const [reportBuffers, setReportBuffers] = useState<ArrayBuffer[]>([]);
+  // Add state to store sheet names for download
+  const [reportSheetNames, setReportSheetNames] = useState<string[]>([]);
+
+  const handleFileUpload = (file: File) => {
+    setUploadedFile(file);
+    setProcessingResult(null);
+    setGeneratedExcelBuffer(null);
+    setError(null);
+    setParsedTables([]);
+    setSelectedTableIdx(0);
+  };
+
+  // Helper to generate all report buffers and sheet names
+  async function generateAllReportBuffers(parsedTables: { table: any[][], modelName: string }[], _uploadedFile: File | null) {
+    let sheetNames: string[] = [];
+    const buffers: ArrayBuffer[] = [];
+    for (let t = 0; t < parsedTables.length; t++) {
+      const { table } = parsedTables[t];
+      const [headerRow, ...dataRows] = table;
+      const idxPoNo = headerRow.indexOf('SA4 PO NO#');
+      let poNo = idxPoNo !== -1 ? String(dataRows[0]?.[idxPoNo] || `Report ${t+1}`) : `Report ${t+1}`;
+      let sheetName = poNo.replace(/[\\/?*\[\]:]/g, '_').substring(0, 31);
+      let origSheetName = sheetName;
+      let suffix = 2;
+      while (sheetNames.includes(sheetName)) {
+        sheetName = origSheetName.substring(0, 28) + '_' + suffix;
+        suffix++;
+      }
+      sheetNames.push(sheetName);
+      // Load template for each report
+      const response = await fetch('/ReportTemplate.xlsx');
+      const arrayBuffer = await response.arrayBuffer();
+      const templateWb = new ExcelJS.Workbook();
+      await templateWb.xlsx.load(arrayBuffer);
+      const ws = templateWb.getWorksheet('Report');
+      if (!ws) throw new Error("Worksheet 'Report' not found in template.");
+      // Fill the worksheet as before (reuse fillData logic)
+      await (async () => {
+        // Debug: log the parsed table structure
+        console.log('headerRow:', headerRow);
+        console.log('dataRows:', dataRows);
+
+        // Column indices
+        const idxColor = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('COLOR'));
+        const idxCaseNos = headerRow.indexOf('CASE NOS');
+        const idxPoNo = headerRow.indexOf('SA4 PO NO#');
+        const idxS4Material = headerRow.indexOf('S4 Material');
+        const idxECCMaterial = headerRow.indexOf('Material No#');
+        const idxUnitsCrt = headerRow.indexOf('QTY / CARTON'); // G
+        const idxTotalUnit = headerRow.indexOf('TOTAL QTY');    // O
+        const idxTotalNw = headerRow.indexOf('TOTAL N.W.');     // P
+        const idxTotalGw = headerRow.indexOf('TOTAL G.W.');     // Q
+        const idxTotalCbm = headerRow.indexOf('TOTAL CBM');     // U, V
+        const idxLength = headerRow.indexOf('Length');   // R
+        const idxWidth = headerRow.indexOf('Width');     // S
+        const idxHeight = headerRow.indexOf('Height');   // T
+        const sizeNames = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL'];
+
+        // Helper to safely get a value
+        const safe = (row: any[], idx: number) => (idx >= 0 && row && row[idx] !== undefined ? row[idx] : '');
+
+        // Fill header fields
+        const poNo = safe(dataRows[0], idxPoNo);
+        ws.getCell('D14').value = poNo; // PO-Line
+        ws.getCell('E14').value = `${poNo} / ${poNo}`; // SAP PO#
+        ws.getCell('D16').value = poNo; // Model #
+        // Model Name logic: find the first CASE NOS cell, get 2 rows above
+        let modelName = '';
+        for (let i = 0; i < table.length; i++) {
+          if (safe(table[i], idxCaseNos) && String(safe(table[i], idxCaseNos)).toLowerCase().includes('case')) {
+            modelName = safe(table[i-2], idxCaseNos);
+            break;
+          }
+        }
+        // Prefer parsedTables[t].modelName if available
+        if (parsedTables[t]?.modelName) {
+          modelName = parsedTables[t].modelName;
+        }
+        ws.getCell('E16').value = modelName;
+        // Remove setting E10 to the model name
+        // ws.getCell('E10').value = modelName;
+        // Clear E7 to prevent extra model name
+        ws.getCell('E7').value = '';
+
+        // --- DYNAMIC MAIN TABLE ROWS AT C20 ---
+        const mainTableStart = 20; // C20 is row 20
+        const numDataRows = dataRows.length;
+        ws.insertRows(mainTableStart, Array(numDataRows).fill([]));
+
+        // Copy formatting for new rows from the template's main table row (row 20 before insertion)
+        const styleRow = ws.getRow(mainTableStart + numDataRows); // This is the original template row 20
+        for (let i = 0; i < numDataRows; i++) {
+          const newRow = ws.getRow(mainTableStart + i);
+          for (let j = 1; j <= ws.columnCount; j++) {
+            const styleCell = styleRow.getCell(j);
+            const newCell = newRow.getCell(j);
+            newCell.style = { ...styleCell.style };
+            if (styleCell.numFmt) newCell.numFmt = styleCell.numFmt;
+            if (styleCell.alignment) newCell.alignment = styleCell.alignment;
+            if (styleCell.border) newCell.border = styleCell.border;
+            if (styleCell.fill) newCell.fill = styleCell.fill;
+            // 1. Formula assignment
+            if (styleCell.formula) {
+              newCell.value = { formula: styleCell.formula, result: undefined };
+            }
+          }
+        }
+
+        let prevColor = '';
+        let prevS4SKU = '';
+        let prevECC = '';
+
+        dataRows.forEach((row, i) => {
+          const rowNum = mainTableStart + i;
+          ws.getCell(`C${rowNum}`).value = safe(row, idxCaseNos); // Carton #
+
+          // Color (D)
+          let color = safe(row, idxColor);
+          if (!color) color = prevColor;
+          ws.getCell(`D${rowNum}`).value = color;
+          prevColor = color;
+
+          // S4 HANA SKU (E)
+          let s4sku = safe(row, idxS4Material);
+          if (!s4sku) s4sku = prevS4SKU;
+          ws.getCell(`E${rowNum}`).value = s4sku;
+          prevS4SKU = s4sku;
+
+          // ECC Material No (F)
+          let ecc = safe(row, idxECCMaterial);
+          if (!ecc) ecc = prevECC;
+          ws.getCell(`F${rowNum}`).value = typeof ecc === 'string' && (ecc.startsWith('X') || ecc.startsWith('L')) ? ecc : prevECC;
+          prevECC = typeof ws.getCell(`F${rowNum}`).value === 'string' ? ws.getCell(`F${rowNum}`).value as string : '';
+
+          sizeNames.forEach((size, j) => {
+            const idx = headerRow.indexOf(size);
+            if (idx !== -1) {
+              ws.getCell(String.fromCharCode(71 + j) + rowNum).value = safe(row, idx);
+            }
+          });
+          let rawO = safe(row, idxTotalUnit);
+          let rawN = safe(row, 10); // Get N value from the data row, not from worksheet
+          let valO = rawO !== undefined && rawO !== null && rawO !== '' ? parseFloat(rawO) : null;
+          let valN = rawN !== undefined && rawN !== null && rawN !== '' ? parseFloat(rawN) : null;
+
+          // Calculate column G (O divided by N)
+          console.log(`Row ${rowNum}: rawO=${rawO}, rawN=${rawN}, valO=${valO}, valN=${valN}`);
+          
+          if (valO && valN && valN !== 0) {
+            const gValue = valO / valN;
+            ws.getCell(`G${rowNum}`).value = gValue;
+            ws.getCell(`O${rowNum}`).value = valO;
+            ws.getCell(`N${rowNum}`).value = valN;
+            console.log(`Row ${rowNum}: Column G calculated = ${gValue}`);
+          } else {
+            // If either O or N is 0/blank, set G to blank and copy from above if available
+            if (rowNum > mainTableStart) {
+              const prevGValue = ws.getCell(`G${rowNum - 1}`).value;
+              ws.getCell(`G${rowNum}`).value = prevGValue || '';
+              console.log(`Row ${rowNum}: Column G copied from above = ${prevGValue}`);
+            } else {
+              ws.getCell(`G${rowNum}`).value = '';
+              console.log(`Row ${rowNum}: Column G set to blank (first row)`);
+            }
+            ws.getCell(`O${rowNum}`).value = '';
+            ws.getCell(`N${rowNum}`).value = '';
+            valO = null;
+            valN = null;
+          }
+
+          // Set N and O values (these were being overwritten later anyway)
+          ws.getCell(`N${rowNum}`).value = valN || safe(row, 10);
+          ws.getCell(`O${rowNum}`).value = valO || parseFloat(safe(row, idxTotalUnit)) || 0;
+          ws.getCell(`G${rowNum}`).value = safe(row, idxUnitsCrt);      // G: Units/CRT
+          ws.getCell(`P${rowNum}`).value = safe(row, idxTotalNw);       // P: TOTAL N.W.
+          ws.getCell(`Q${rowNum}`).value = safe(row, idxTotalGw);       // Q: TOTAL G.W.
+          ws.getCell(`U${rowNum}`).value = safe(row, idxTotalCbm);      // U: TOTAL CBM
+          ws.getCell(`V${rowNum}`).value = safe(row, idxTotalCbm);      // V: TOTAL CBM (if needed)
+          ws.getCell(`R${rowNum}`).value = safe(row, idxLength);   // R: Length
+          ws.getCell(`S${rowNum}`).value = safe(row, idxWidth);    // S: Width
+          ws.getCell(`T${rowNum}`).value = safe(row, idxHeight);   // T: Height
+        });
+
+        
+
+        // --- SUMMARY AND COLOR BREAKDOWN ---
+        // Move summary and color breakdown to start 1 row below the last data row
+        const summaryStartRow = mainTableStart + numDataRows + 1;
+        // Merge D and E for the summary name
+        ws.mergeCells(`D${summaryStartRow}:E${summaryStartRow}`);
+        ws.getCell(`D${summaryStartRow}`).value = 'Summary';
+        ws.getCell(`D${summaryStartRow}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        // Get the last Carton# entry and process it
+        const lastCartonEntry = dataRows.length > 0 ? safe(dataRows[dataRows.length - 1], idxCaseNos) : '';
+        let processedCartonValue = lastCartonEntry;
+        if (lastCartonEntry && lastCartonEntry.includes('-')) {
+          const parts = lastCartonEntry.split('-');
+          processedCartonValue = parts[parts.length - 1].trim();
+        }
+        console.log(`Last Carton# entry: "${lastCartonEntry}" -> Processed value: "${processedCartonValue}"`);
+
+        // Write summary titles in D, values in E
+        const summaryData = [
+          { title: 'Total Carton', value: processedCartonValue },
+          { title: 'Total Net Weight', value: dataRows.reduce((acc, row) => acc + (parseFloat(safe(row, idxTotalNw)) || 0), 0) },
+          { title: 'Total Gross Weight', value: dataRows.reduce((acc, row) => acc + (parseFloat(safe(row, idxTotalGw)) || 0), 0) },
+          { title: 'Total CBM', value: parseFloat(dataRows.reduce((acc, row) => acc + (parseFloat(safe(row, idxTotalCbm)) || 0), 0).toFixed(3)) }
+        ];
+        summaryData.forEach((item, i) => {
+          ws.getCell(`D${summaryStartRow + 1 + i}`).value = item.title;
+          ws.getCell(`E${summaryStartRow + 1 + i}`).value = item.value;
+        });
+
+        // --- COLOR BREAKDOWN FROM GENERATED WORKSHEET ---
+        // Columns H:N are OS, XS, S, M, L, XL, XXL (col 8-14, 1-based)
+        const colorMap: Record<string, number[]> = {};
+        // Map each size to its worksheet column letter (adjusted for your template)
+        const sizeColLetters = ['G', 'H', 'I', 'J', 'K', 'L', 'M']; // OS, XS, S, M, L, XL, XXL
+        const unitsCrtCol = 'N'; // Units/CRT is in column N
+        for (let i = 0; i < numDataRows; i++) {
+          const rowNum = mainTableStart + i;
+          const color = ws.getCell(`D${rowNum}`).value?.toString().trim() || '';
+          if (!color) continue;
+          if (!colorMap[color]) colorMap[color] = [0,0,0,0,0,0,0];
+          const unitsCRT = parseFloat(String(ws.getCell(`${unitsCrtCol}${rowNum}`).value)) || 0;
+          for (let j = 0; j < 7; j++) {
+            const colLetter = sizeColLetters[j];
+            const sizeVal = parseFloat(String(ws.getCell(`${colLetter}${rowNum}`).value)) || 0;
+            const product = sizeVal * unitsCRT;
+            colorMap[color][j] += product;
+            console.log(`Row ${rowNum}, Color: ${color}, Size: ${sizeNames[j]}, Col: ${colLetter}, SizeVal: ${sizeVal}, UnitsCRT: ${unitsCRT}, Product: ${product}`);
+          }
+        }
+        console.log('colorMap for breakdown (from worksheet):', colorMap);
+
+        // --- DYNAMIC COLOR BREAKDOWN TABLE ---
+        // Place color breakdown headers adjacent to the Total Carton row in the summary
+        const colorBreakdownStartRow = summaryStartRow + 1; // This is the Total Carton row
+        const colorBreakdownStartCol = 6; // Column F
+        const colorHeaders = ['Color', ...sizeNames, 'Total'];
+        const borderStyle = { style: 'thin' as ExcelJS.BorderStyle };
+        const headerBorder = { top: borderStyle, left: borderStyle, bottom: borderStyle, right: borderStyle };
+
+        // Write headers with borders
+        colorHeaders.forEach((header, i) => {
+          const cell = ws.getCell(colorBreakdownStartRow, colorBreakdownStartCol + i);
+          cell.value = header;
+          cell.style = { font: { bold: true }, alignment: { horizontal: 'center', vertical: 'middle' } };
+          cell.border = headerBorder;
+        });
+
+        // Filter out empty or falsy color keys
+        const validColors = Object.keys(colorMap).filter(c => c && c.trim() !== '');
+
+        // Write color breakdown rows dynamically with borders
+        let colorIdx = 0;
+        for (const color of validColors) {
+          ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol).value = color;
+          ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol).style = { alignment: { horizontal: 'left' } };
+          ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol).border = headerBorder;
+          for (let i = 0; i < 7; i++) {
+            const cell = ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol + 1 + i);
+            cell.value = colorMap[color][i];
+            cell.style = { alignment: { horizontal: 'center' } };
+            cell.border = headerBorder;
+          }
+          // Total for the color
+          const totalCell = ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol + 8);
+          totalCell.value = colorMap[color].reduce((a, b) => a + b, 0);
+          totalCell.style = { font: { bold: true }, alignment: { horizontal: 'center' } };
+          totalCell.border = headerBorder;
+          colorIdx++;
+        }
+        // Write the total row for color breakdown with borders
+        ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol).value = 'Total';
+        ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol).style = { font: { bold: true }, alignment: { horizontal: 'left' } };
+        ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol).border = headerBorder;
+        for (let i = 0; i < 7; i++) {
+          const cell = ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol + 1 + i);
+          cell.value = Object.values(colorMap).reduce((acc, arr) => acc + arr[i], 0);
+          cell.style = { font: { bold: true }, alignment: { horizontal: 'center' } };
+          cell.border = headerBorder;
+        }
+        const grandTotalCell = ws.getCell(colorBreakdownStartRow + 1 + colorIdx, colorBreakdownStartCol + 8);
+        grandTotalCell.value = Object.values(colorMap).reduce((acc, arr) => acc + arr.reduce((a, b) => a + b, 0), 0);
+        grandTotalCell.style = { font: { bold: true }, alignment: { horizontal: 'center' } };
+        grandTotalCell.border = headerBorder;
+
+        // --- ANCHOR IMAGE TO CELL T22 ---
+        // Find and reposition the existing image to anchor it to cell T22
+        try {
+          // Try to get images using different methods
+          console.log('Worksheet object:', ws);
+          console.log('Worksheet properties:', Object.keys(ws));
+          
+          // Check if getImages method exists
+          if (typeof ws.getImages === 'function') {
+            const images = ws.getImages();
+            console.log('Found images using getImages():', images ? images.length : 0);
+            
+            if (images && images.length > 0) {
+              console.log('First image:', images[0]);
+              console.log('Image properties:', Object.keys(images[0]));
+            }
+          } else {
+            console.log('getImages() method not available');
+          }
+          
+          // Alternative: check if images are stored differently
+          // if (ws.images) {
+          //   console.log('ws.images found:', ws.images);
+          // }
+          
+          // Alternative: check if images are in the model
+          // if (ws.model && ws.model.images) {
+          //   console.log('ws.model.images found:', ws.model.images);
+          // }
+          
+        } catch (error) {
+          console.error('Error handling image anchoring:', error);
+          if (error instanceof Error) {
+            console.error('Error stack:', error.stack);
+          }
+          // Continue without image anchoring if there's an error
+        }
+      })();
+      // Export this workbook to a buffer
+      const buffer = await templateWb.xlsx.writeBuffer();
+      buffers.push(buffer);
+    }
+    return { buffers, sheetNames };
+  }
+
+  const handleGenerateReports = async () => {
+    if (!parsedTables.length) return;
+    setIsProcessing(true);
+    setError(null);
+    try {
+      // Generate all report buffers and sheet names
+      const { buffers, sheetNames } = await generateAllReportBuffers(parsedTables, uploadedFile);
+      setReportBuffers(buffers);
+      setReportSheetNames(sheetNames);
+      // For now, just use the first buffer for preview
+      setGeneratedExcelBuffer(buffers[0] || null);
+      setProcessingResult({
+        success: true,
+        orderReports: [],
+        excelBuffer: buffers[0] || null,
+        validationLog: [],
+        strictValidationResults: [],
+        originalFileName: `${(uploadedFile?.name || 'Report').replace(/\.xlsx?$/i, '')}-Report.xlsx`,
+        processedAt: new Date()
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred while processing the file');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Add a new function to generate and download all reports as a zip
+  const handleDownloadAllReportsAsZip = async () => {
+    if (!parsedTables.length || !uploadedFile) return;
+    setIsProcessing(true);
+    setError(null);
+    try {
+      const baseName = (uploadedFile?.name || 'Report').replace(/\.xlsx?$/i, '');
+      const zip = new JSZip();
+      // Use the shared helper
+      const { buffers, sheetNames } = await generateAllReportBuffers(parsedTables, uploadedFile);
+      for (let i = 0; i < buffers.length; i++) {
+        zip.file(`${baseName}-${sheetNames[i]}.xlsx`, buffers[i]);
+      }
+      // Generate the zip and trigger download
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      saveAs(zipBlob, `${baseName}-AllReports.zip`);
+      setReportBuffers(buffers);
+      setReportSheetNames(sheetNames);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred while zipping the reports');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Add a function to download a single report
+  const handleDownloadSingleReport = (idx: number) => {
+    if (!reportBuffers[idx] || !reportSheetNames[idx]) return;
+    const baseName = (uploadedFile?.name || 'Report').replace(/\.xlsx?$/i, '');
+    const fileName = `${baseName}-${reportSheetNames[idx]}.xlsx`;
+    saveAs(new Blob([reportBuffers[idx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), fileName);
+  };
+
+  const handleReset = () => {
+    setUploadedFile(null);
+    setProcessingResult(null);
+    setGeneratedExcelBuffer(null);
+    setError(null);
+    setIsProcessing(false);
+    setParsedTables([]);
+    setSelectedTableIdx(0);
+  };
+
+  // Add the handler function if not present
+  const handleExportAllAsSingleExcel = async () => {
+    if (!uploadedFile) return;
+    setIsProcessing(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadedFile);
+
+      const response = await fetch('http://localhost:8000/generate-reports/', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error('Failed to generate combined report');
+
+      const blob = await response.blob();
+      saveAs(blob, 'AllReports.xlsx');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred while exporting the combined report');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <Header />
+      <main className="w-full px-2 py-8">
+        <div className="space-y-8">
+          {/* File Upload Section */}
+          <section className="card">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">
+              Upload TK List
+            </h2>
+            <FileUpload 
+              onFileUpload={handleFileUpload}
+              uploadedFile={uploadedFile}
+              disabled={isProcessing}
+            />
+          </section>
+
+          {/* Processing Controls */}
+          {uploadedFile && !processingResult && (
+            <section className="card">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-medium text-gray-900">
+                    Ready to Process
+                  </h3>
+                  <p className="text-gray-600 mt-1">
+                    File: {uploadedFile.name}
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleReset}
+                    className="btn-secondary"
+                    disabled={isProcessing}
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={handleGenerateReports}
+                    className="btn-primary"
+                    disabled={isProcessing}
+                  >
+                    Generate Reports
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Side-by-side Excel Previews (Excel-like) */}
+          {(uploadedFile || generatedExcelBuffer) && (
+            <section className="card" style={{ padding: 0, maxWidth: '100%' }}>
+              <div className="flex flex-col md:flex-row gap-6 w-full">
+                <div className="flex-1 min-w-0">
+                  <ExcelHandsontablePreview
+                    excelFile={uploadedFile}
+                    title="PK Table"
+                    onTablesExtracted={setParsedTables}
+                    onSelectedTableChange={(_table, _modelName) => {
+                      // Find the index of the selected table
+                      const idx = parsedTables.findIndex(t => t.table === _table && t.modelName === _modelName);
+                      if (idx >= 0) setSelectedTableIdx(idx);
+                    }}
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  {reportBuffers[selectedTableIdx] && (
+                    <LuckysheetPreview
+                      excelBlob={new Blob([reportBuffers[selectedTableIdx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })}
+                    />
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Export/Process Buttons - move above validation results */}
+          {processingResult && reportBuffers.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-4">
+              <button
+                onClick={() => handleDownloadSingleReport(selectedTableIdx)}
+                className="btn-secondary flex items-center gap-2"
+                disabled={
+                  !reportBuffers[selectedTableIdx] || !reportSheetNames[selectedTableIdx]
+                }
+              >
+                {/* Download icon */}
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" /></svg>
+                Export Single Report{reportSheetNames[selectedTableIdx] ? ` - ${reportSheetNames[selectedTableIdx]}` : ''}
+              </button>
+              <button
+                onClick={handleDownloadAllReportsAsZip}
+                className="btn-primary flex items-center gap-2"
+              >
+                {/* Zip/file icon */}
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+                Export All as Zip
+              </button>
+              <button
+                onClick={handleReset}
+                className="btn-secondary flex items-center gap-2"
+              >
+                {/* Refresh/plus icon */}
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+                Process New File
+              </button>
+              {/* Add the new Export All as Single Excel button here */}
+              <button
+                onClick={handleExportAllAsSingleExcel}
+                className="btn-primary flex items-center gap-2"
+              >
+                {/* Excel icon */}
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+                Export All as Single Excel
+              </button>
+            </div>
+          )}
+
+          {/* Processing Status */}
+          {isProcessing && (
+            <ProcessingStatus />
+          )}
+
+          {/* Error Display */}
+          {error && (
+            <section className="card border-red-200 bg-red-50">
+              <div className="flex items-start gap-3">
+                <div className="w-5 h-5 text-red-500 mt-0.5">
+                  <svg fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-lg font-medium text-red-900">
+                    Processing Error
+                  </h3>
+                  <p className="text-red-700 mt-1">{error}</p>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Results */}
+          {processingResult && (
+            <>
+              <ReportResults 
+                result={processingResult}
+                onReset={handleReset}
+              />
+              <ValidationResults 
+                validationLog={processingResult.validationLog}
+              />
+              <StrictValidationResults
+                validationResults={processingResult.strictValidationResults}
+                onReset={handleReset}
+              />
+            </>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export default App;
+
+export async function generateExcelReportWithExcelJS(
+  templateUrl: string,
+  fillData: (workbook: ExcelJS.Workbook) => Promise<void>
+): Promise<Blob> {
+  // Fetch the template as ArrayBuffer
+  const response = await fetch(templateUrl);
+  const arrayBuffer = await response.arrayBuffer();
+
+  // Load workbook from template
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(arrayBuffer);
+
+  // Fill in the data
+  await fillData(workbook);
+
+  // Export to Blob
+  const buffer = await workbook.xlsx.writeBuffer();
+  return new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
