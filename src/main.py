@@ -9,7 +9,8 @@ import io
 import re
 from typing import List
 import json
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.cell.cell import MergedCell
 
 app = FastAPI()
 
@@ -48,6 +49,7 @@ HEADER_MAPPING = {
 
 # Choose the grouping key (adjust as needed)
 GROUP_KEY = 'sa4PoNo'
+
 
 # Normalize header
 def normalize_header(header):
@@ -140,31 +142,107 @@ def fill_template_with_data(ws, rows, group_name):
     ws['D16'] = po_line_value
     # Set SAP PO# (E14) and PO NO# to sheet name
     ws['E14'] = group_name
-    # Model Name (E16) remains as before
-    ws['E16'] = first_row.get('modelName', group_name)
+    # --- Model Name logic: match frontend (App.tsx) ---
+    model_name = ''
+    for i in range(len(rows)):
+        case_nos_val = str(rows[i].get('caseNos', '')).lower()
+        if 'case' in case_nos_val:
+            if i - 2 >= 0:
+                model_name = rows[i-2].get('caseNos', '')
+            break
+    # Prefer the modelName field if available
+    if rows and rows[0].get('modelName'):
+        model_name = rows[0]['modelName']
+
+    # Set Model Name (E16) in the worksheet
+    ws['E16'] = model_name
     ws['E7'] = ''
 
     # Main table starts at row 20 (C20)
     main_table_start = 20
     num_data_rows = len(rows)
     template_data_rows = 1  # Assume template has 1 data row by default
+
+    # --- Unmerge any merged cells in the main table data area (C20:V<end>) BEFORE inserting rows ---
+    main_table_data_start = main_table_start
+    main_table_data_end = main_table_start + num_data_rows + 20  # a safe buffer
+    for merged_range in list(ws.merged_cells.ranges):
+        if (
+            merged_range.min_row >= main_table_data_start and
+            merged_range.max_row <= main_table_data_end and
+            merged_range.min_col >= 3 and
+            merged_range.max_col <= 22
+        ):
+            ws.unmerge_cells(str(merged_range))
+
     if num_data_rows > template_data_rows:
         ws.insert_rows(main_table_start + 1, num_data_rows - template_data_rows)
 
-    # Fill columns with correct alignment
-    size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
+    # --- MAIN TABLE: Propagate carton numbers and track ranges for merging (match App.tsx logic) ---
+    effective_carton_nos = []
+    last_carton_no = ''
+    carton_row_ranges = {}
+    for i, row in enumerate(rows):
+        carton_no = str(row.get('caseNos', '')).strip()
+        # Only propagate and track valid carton numbers (not empty, not 'nan')
+        if carton_no and carton_no.lower() != 'nan':
+            last_carton_no = carton_no
+        effective_carton_nos.append(last_carton_no)
+        row_num = main_table_start + i
+        if last_carton_no and last_carton_no.lower() != 'nan':
+            if last_carton_no not in carton_row_ranges:
+                carton_row_ranges[last_carton_no] = {'start': row_num, 'end': row_num}
+            else:
+                carton_row_ranges[last_carton_no]['end'] = row_num
+
+    # --- Write main table with split-carton OS logic and inline copy-down for D/E/F ---
+    prev_color = ''
+    prev_s4 = ''
+    prev_ecc = ''
     for i, row in enumerate(rows):
         row_num = main_table_start + i
-        ws.cell(row=row_num, column=3, value=row.get('caseNos', ''))  # C: CASE NOS
-        ws.cell(row=row_num, column=4, value=row.get('color', ''))    # D: COLOR
-        ws.cell(row=row_num, column=5, value=row.get('s4Material', ''))  # E: S4 Material
-        ws.cell(row=row_num, column=6, value=row.get('materialNo', ''))  # F: Material No#
-        ws.cell(row=row_num, column=7, value=row.get('unitsCrt', ''))    # G: Units/CRT (was in N)
+        carton_no = effective_carton_nos[i]
+        # Only write Carton# for the first row in the group, else leave blank
+        if carton_no and carton_no.lower() != 'nan' and carton_row_ranges.get(carton_no, {}).get('start') == row_num:
+            ws.cell(row=row_num, column=3, value=carton_no)  # C: CASE NOS
+        else:
+            ws.cell(row=row_num, column=3, value='')
+
+        # Color (D)
+        color = str(row.get('color', '')).strip()
+        if not color or color.lower() in ['nan', 'none']:
+            color = prev_color
+        ws.cell(row=row_num, column=4, value=color)
+        prev_color = color
+
+        # S4 HANA SKU (E)
+        s4sku = str(row.get('s4Material', '')).strip()
+        if not s4sku or s4sku.lower() in ['nan', 'none']:
+            s4sku = prev_s4
+        ws.cell(row=row_num, column=5, value=s4sku)
+        prev_s4 = s4sku
+
+        # ECC Material No (F)
+        ecc = str(row.get('materialNo', '')).strip()
+        if not ecc or ecc.lower() in ['nan', 'none']:
+            ecc = prev_ecc
+        ws.cell(row=row_num, column=6, value=ecc)
+        prev_ecc = ecc
+
+        # --- SPLIT CARTON LOGIC FOR OS COLUMN (split carton -> J, else L) ---
+        if carton_no and carton_no.lower() != 'nan' and sum(1 for c in effective_carton_nos if c == carton_no) > 1:
+            os_val = row.get('totalQty', '')  # Column J (index 9)
+        else:
+            os_val = row.get('unitsCrt', '')  # Column L (index 11)
+        ws.cell(row=row_num, column=7, value=os_val)    # G: OS
+
         # Sizes H-M
-        for j, size in enumerate(size_names):
+        size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
+        for j, size in enumerate(size_names[1:]):  # skip OS, already filled
             ws.cell(row=row_num, column=8+j, value=row.get(size, ''))
-        ws.cell(row=row_num, column=14, value=row.get('carton', ''))      # N: Carton (was in K)
-        ws.cell(row=row_num, column=15, value=row.get('totalUnit', ''))   # O: Total Unit (was in M)
+
+        ws.cell(row=row_num, column=14, value=row.get('carton', ''))      # N: Carton
+        ws.cell(row=row_num, column=15, value=row.get('totalUnit', ''))   # O: Total Unit
         ws.cell(row=row_num, column=16, value=safe_float(row.get('totalNw', 0)))  # P: TOTAL N.W.
         ws.cell(row=row_num, column=17, value=safe_float(row.get('totalGw', 0)))  # Q: TOTAL G.W.
         ws.cell(row=row_num, column=18, value=row.get('Length', ''))    # R: Length
@@ -174,60 +252,274 @@ def fill_template_with_data(ws, rows, group_name):
         ws.cell(row=row_num, column=21, value=cbm_value)  # U: CBM
         ws.cell(row=row_num, column=22, value=cbm_value)  # V: TOTAL CBM
 
-    # Place summary and color breakdown headers on the same row after the main table, with a gap
-    gap = 1
-    header_row = main_table_start + num_data_rows + gap + 1
+    # --- Only merge Carton# and N–V columns (do not merge D/E/F) ---
+    for carton_no, rng in carton_row_ranges.items():
+        if carton_no and carton_no.lower() != 'nan' and rng['end'] > rng['start']:
+            ws.merge_cells(start_row=rng['start'], start_column=3, end_row=rng['end'], end_column=3)
+            for col in range(14, 23):  # N–V
+                ws.merge_cells(start_row=rng['start'], start_column=col, end_row=rng['end'], end_column=col)
+
+    # --- SUMMARY AND COLOR BREAKDOWN (replicate frontend logic) ---
+    # Always write summary and color breakdown at fixed positions after the main table
+    size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
+    main_table_start = 20
+    num_data_rows = len(rows)
+    summary_start_row = main_table_start + num_data_rows + 1
     summary_col = 4  # D
     value_col = 5    # E
     color_breakdown_col = 6  # F
 
-    # Merge and style the summary header (D/E)
-    ws.merge_cells(start_row=header_row, start_column=summary_col, end_row=header_row, end_column=value_col)
-    header_cell = ws.cell(row=header_row, column=summary_col)
-    header_cell.value = 'Summary'
+    # --- CLEAR TEMPLATE SUMMARY AND COLOR BREAKDOWN AREA ---
+
+    # Determine where the main table ends
+    main_table_end_row = main_table_start + num_data_rows - 1
+    clear_start_row = main_table_end_row + 1
+    clear_end_row = summary_start_row + 20
+    for row in range(clear_start_row, clear_end_row):
+        for col in range(4, 15):  # D to N (or further if needed)
+            cell = ws.cell(row=row, column=col)
+            if isinstance(cell, MergedCell):
+                continue
+            cell.value = None
+            cell.font = None
+            cell.alignment = None
+            cell.fill = PatternFill()
+            cell.border = Border()
+
+    # Unmerge any merged cells in this area
+    for merged_range in list(ws.merged_cells.ranges):
+        if (merged_range.min_row >= clear_start_row and
+            merged_range.max_row <= clear_end_row and
+            merged_range.min_col >= 4 and
+            merged_range.max_col <= 15):
+            ws.unmerge_cells(str(merged_range))
+
+    # --- SUMMARY SECTION ---image.png
+    # Merge D and E for the summary name
+    ws.merge_cells(start_row=summary_start_row, start_column=summary_col, end_row=summary_start_row, end_column=value_col)
+    header_cell = ws.cell(row=summary_start_row, column=summary_col)
+    header_cell.value = "Summary"
     header_cell.alignment = Alignment(horizontal='center', vertical='center')
     header_cell.font = Font(bold=True)
     header_cell.fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
 
-    # (Assume color breakdown headers are present in the template at header_row, columns F onward)
-
     # Write summary values (labels and values) below the summary header
-    ws.cell(row=header_row+1, column=summary_col, value='Total Carton')
-    ws.cell(row=header_row+1, column=value_col, value=num_data_rows)
-    ws.cell(row=header_row+2, column=summary_col, value='Total Net Weight (kg)')
-    ws.cell(row=header_row+2, column=value_col, value=round(sum(safe_float(row.get('totalNw', 0)) for row in rows), 3))
-    ws.cell(row=header_row+3, column=summary_col, value='Total Gross Weight (kg)')
-    ws.cell(row=header_row+3, column=value_col, value=round(sum(safe_float(row.get('totalGw', 0)) for row in rows), 3))
-    ws.cell(row=header_row+4, column=summary_col, value='Total CBM')
-    ws.cell(row=header_row+4, column=value_col, value=round(sum(safe_float(row.get('cbm', row.get('totalCbm', 0))) for row in rows), 3))
+    ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
+    ws.cell(row=summary_start_row+1, column=value_col, value=num_data_rows)
+    ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight (kg)')
+    ws.cell(row=summary_start_row+2, column=value_col, value=round(sum(safe_float(row.get('totalNw', 0)) for row in rows), 3))
+    ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight (kg)')
+    ws.cell(row=summary_start_row+3, column=value_col, value=round(sum(safe_float(row.get('totalGw', 0)) for row in rows), 3))
+    ws.cell(row=summary_start_row+4, column=summary_col, value='Total CBM')
+    ws.cell(row=summary_start_row+4, column=value_col, value=round(sum(safe_float(row.get('cbm', row.get('totalCbm', 0))) for row in rows),3))
 
-    # Write color breakdown data below the color breakdown headers
-    color_breakdown_data_row = header_row + 1
-    # Calculate color_size_counts before using it
-    color_size_counts = {}
+    # --- COLOR BREAKDOWN SECTION (replicating frontend split-carton logic) ---
+    # Place color breakdown headers to align with the summary header row
+    color_breakdown_start_row = summary_start_row  # Align with summary header row
+    color_breakdown_start_col = color_breakdown_col
+    color_headers = ['Color'] + size_names + ['Total']
+    border_style = Side(style='thin')
+    header_border = Border(top=border_style, left=border_style, bottom=border_style, right=border_style)
+
+    # Write headers with borders
+    for i, header in enumerate(color_headers):
+        cell = ws.cell(row=color_breakdown_start_row, column=color_breakdown_start_col + i, value=header)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = header_border
+
+    # --- NEW LOGIC: propagate carton numbers and build carton count map ---
+    effective_carton_nos = []
+    last_carton_no = ''
     for row in rows:
-        color = row.get('color', '')
-        if not color:
+        carton_no = str(row.get('caseNos', '')).strip()
+        if carton_no:
+            last_carton_no = carton_no
+        effective_carton_nos.append(last_carton_no)
+    carton_count_map = {}
+    for carton_no in effective_carton_nos:
+        if not carton_no:
             continue
-        if color not in color_size_counts:
-            color_size_counts[color] = {size: 0 for size in size_names}
-        for size in size_names:
-            color_size_counts[color][size] += safe_float(row.get(size, 0))
+        carton_count_map[carton_no] = carton_count_map.get(carton_no, 0) + 1
 
-    for i, (color, size_dict) in enumerate(color_size_counts.items()):
-        ws.cell(row=color_breakdown_data_row + i, column=color_breakdown_col, value=color)
-        total = 0
-        for j, size in enumerate(size_names):
-            val = size_dict[size]
-            ws.cell(row=color_breakdown_data_row + i, column=color_breakdown_col + 1 + j, value=val)
-            total += val
-        ws.cell(row=color_breakdown_data_row + i, column=color_breakdown_col + 1 + len(size_names), value=total)
+    # Calculate color breakdown data with split-carton logic for OS
+    color_map = {}
+    for i, row in enumerate(rows):
+        color = str(row.get('color', '')).strip()
+        if not color or color.lower() in ['nan', 'none']:
+            continue
+        if color not in color_map:
+            color_map[color] = [0] * len(size_names)
+        carton_no = effective_carton_nos[i]
+        # OS column (index 0): use split carton logic
+        if carton_no and carton_count_map[carton_no] > 1:
+            # Split carton: use OS value (unitsCrt)
+            os_val = safe_float(row.get('OS', row.get('unitsCrt', 0)))
+            color_map[color][0] += os_val
+        else:
+            # Single carton: use Total Unit value
+            os_val = safe_float(row.get('totalUnit', 0))
+            color_map[color][0] += os_val
+        # Other sizes: sum as before
+        for j, size in enumerate(size_names[1:], 1):
+            size_val = safe_float(row.get(size, 0))
+            color_map[color][j] += size_val
 
-    # Write total row for color breakdown
-    ws.cell(row=color_breakdown_data_row + len(color_size_counts), column=color_breakdown_col, value='Total')
-    for j, size in enumerate(size_names):
-        ws.cell(row=color_breakdown_data_row + len(color_size_counts), column=color_breakdown_col + 1 + j, value=sum(size_dict[size] for size_dict in color_size_counts.values()))
-    ws.cell(row=color_breakdown_data_row + len(color_size_counts), column=color_breakdown_col + 1 + len(size_names), value=sum(sum(size_dict[size] for size in size_names) for size_dict in color_size_counts.values()))
+    valid_colors = [color for color in color_map.keys() if color and color.strip().lower() not in ['nan', 'none']]
+
+    # Write color breakdown rows dynamically with borders
+    for color_idx, color in enumerate(valid_colors):
+        row_num = color_breakdown_start_row + 1 + color_idx
+        color_cell = ws.cell(row=row_num, column=color_breakdown_start_col, value=color)
+        color_cell.alignment = Alignment(horizontal='left')
+        color_cell.border = header_border
+        for i in range(len(size_names)):
+            cell = ws.cell(row=row_num, column=color_breakdown_start_col + 1 + i, value=color_map[color][i])
+            cell.alignment = Alignment(horizontal='center')
+            cell.border = header_border
+        total_value = sum(color_map[color])
+        total_cell = ws.cell(row=row_num, column=color_breakdown_start_col + 8, value=total_value)
+        total_cell.font = Font(bold=True)
+        total_cell.alignment = Alignment(horizontal='center')
+        total_cell.border = header_border
+
+    # Write the total row for color breakdown with borders
+    total_row_num = color_breakdown_start_row + 1 + len(valid_colors)
+    total_label_cell = ws.cell(row=total_row_num, column=color_breakdown_start_col, value="Total")
+    total_label_cell.font = Font(bold=True)
+    total_label_cell.alignment = Alignment(horizontal='left')
+    total_label_cell.border = header_border
+    for i in range(len(size_names)):
+        size_total = sum(color_map[color][i] for color in valid_colors)
+        cell = ws.cell(row=total_row_num, column=color_breakdown_start_col + 1 + i, value=size_total)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = header_border
+    grand_total = sum(sum(color_map[color]) for color in valid_colors)
+    grand_total_cell = ws.cell(row=total_row_num, column=color_breakdown_start_col + 8, value=grand_total)
+    grand_total_cell.font = Font(bold=True)
+    grand_total_cell.alignment = Alignment(horizontal='center')
+    grand_total_cell.border = header_border
+
+    # --- Dynamically extend the main report border to the last row of the color breakdown table ---
+    leftmost_col = color_breakdown_start_col
+    rightmost_col = color_breakdown_start_col + len(color_headers) - 1
+    thick_border = Border(bottom=Side(style='thick'))
+    for col in range(leftmost_col, rightmost_col + 1):
+        cell = ws.cell(row=total_row_num, column=col)
+        # Start with the thick bottom border
+        border = Border(
+            left=cell.border.left,
+            right=cell.border.right,
+            top=cell.border.top,
+            bottom=thick_border.bottom
+        )
+        # Add thick left border to the first column
+        if col == leftmost_col:
+            border = Border(
+                left=Side(style='thick'),
+                right=border.right,
+                top=border.top,
+                bottom=border.bottom
+            )
+        # Add thick right border to the last column
+        if col == rightmost_col:
+            border = Border(
+                left=border.left,
+                right=Side(style='thick'),
+                top=border.top,
+                bottom=border.bottom
+            )
+        cell.border = border
+
+    # --- Clear all borders in the top section (B2:W16) ---
+    for row in range(2, 17):  # 2 to 16 inclusive
+        for col in range(2, 24):  # B (2) to W (23)
+            ws.cell(row=row, column=col).border = Border()
+
+    # --- Apply only the requested border ---
+    # Double border for cell C3 (Packing List)
+    ws['C3'].border = Border(
+        left=Side(style='double'),
+        right=Side(style='double'),
+        top=Side(style='double'),
+        bottom=Side(style='double')
+    )
+
+    # --- Apply only the requested borders ---
+    # Double border for cell C3 (Packing List)
+    ws['C3'].border = Border(
+        left=Side(style='double'),
+        right=Side(style='double'),
+        top=Side(style='double'),
+        bottom=Side(style='double')
+    )
+
+    # --- Apply thin borders to the main table (C20:V<end>) ---
+    thin_side = Side(style='thin')
+    thin_border = Border(top=thin_side, left=thin_side, right=thin_side, bottom=thin_side)
+    main_table_end_row = main_table_start + num_data_rows - 1
+    for row in range(main_table_start, main_table_end_row + 1):
+        for col in range(3, 23):  # C (3) to V (22)
+            ws.cell(row=row, column=col).border = thin_border
+
+    # --- Apply thin borders to the summary table (D/E, summary_start_row+1 to summary_start_row+4) ---
+    for row in range(summary_start_row + 1, summary_start_row + 5):
+        for col in range(4, 6):  # D (4) and E (5)
+            ws.cell(row=row, column=col).border = thin_border
+
+    # --- Apply thin borders to the color breakdown table (F to O, color_breakdown_start_row to total_row_num) ---
+    for row in range(color_breakdown_start_row, total_row_num + 1):
+        for col in range(6, 15):  # F (6) to O (14)
+            ws.cell(row=row, column=col).border = thin_border
+
+    # --- Draw a robust thick outer border around the entire report area ---
+    top_row = 2
+    bottom_row = total_row_num + 1  # last row of color breakdown
+    left_col = 2  # Column B
+    right_col = 23  # Column W
+
+    # Top and bottom borders
+    for col in range(left_col, right_col + 1):
+        ws.cell(row=top_row, column=col).border = Border(
+            top=Side(style='thick'),
+            left=ws.cell(row=top_row, column=col).border.left,
+            right=ws.cell(row=top_row, column=col).border.right,
+            bottom=ws.cell(row=top_row, column=col).border.bottom
+        )
+        ws.cell(row=bottom_row, column=col).border = Border(
+            bottom=Side(style='thick'),
+            left=ws.cell(row=bottom_row, column=col).border.left,
+            right=ws.cell(row=bottom_row, column=col).border.right,
+            top=ws.cell(row=bottom_row, column=col).border.top
+        )
+
+    # Left and right borders
+    for row in range(top_row, bottom_row + 1):
+        ws.cell(row=row, column=left_col).border = Border(
+            left=Side(style='thick'),
+            top=ws.cell(row=row, column=left_col).border.top,
+            right=ws.cell(row=row, column=left_col).border.right,
+            bottom=ws.cell(row=row, column=left_col).border.bottom
+        )
+        ws.cell(row=row, column=right_col).border = Border(
+            right=Side(style='thick'),
+            top=ws.cell(row=row, column=right_col).border.top,
+            left=ws.cell(row=row, column=right_col).border.left,
+            bottom=ws.cell(row=row, column=right_col).border.bottom
+        )
+        
+    robust_copy_down(rows, ['color', 's4Material', 'materialNo'])
+
+def robust_copy_down(rows, keys):
+    last_values = {k: '' for k in keys}
+    for row in rows:
+        for k in keys:
+            val = str(row.get(k, '')).strip()
+            if not val or val.lower() in ['nan', 'none']:
+                row[k] = last_values[k]
+            else:
+                last_values[k] = val
 
 # In generate_reports, skip NaN/Unknown group keys
 @app.post("/generate-reports/")

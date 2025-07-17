@@ -67,16 +67,8 @@ function App() {
         // Column indices
         const idxColor = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('COLOR'));
         const idxCaseNos = headerRow.indexOf('CASE NOS');
-        const idxPoNo = headerRow.indexOf('SA4 PO NO#');
         const idxS4Material = headerRow.indexOf('S4 Material');
         const idxECCMaterial = headerRow.indexOf('Material No#');
-        const idxTotalUnit = headerRow.indexOf('TOTAL QTY');    // O
-        const idxTotalNw = headerRow.indexOf('TOTAL N.W.');     // P
-        const idxTotalGw = headerRow.indexOf('TOTAL G.W.');     // Q
-        const idxTotalCbm = headerRow.indexOf('TOTAL CBM');     // U, V
-        const idxLength = headerRow.indexOf('Length');   // R
-        const idxWidth = headerRow.indexOf('Width');     // S
-        const idxHeight = headerRow.indexOf('Height');   // T
         const sizeNames = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL'];
 
         // Helper to safely get a value
@@ -110,6 +102,36 @@ function App() {
         const mainTableStart = 20; // C20 is row 20
         const numDataRows = dataRows.length;
         ws.insertRows(mainTableStart, Array(numDataRows).fill([]));
+
+        // 1. Propagate carton numbers for all rows
+        let lastCartonNo = '';
+        const effectiveCartonNos = dataRows.map(row => {
+          const cartonNo = safe(row, idxCaseNos)?.toString().trim();
+          if (cartonNo) {
+            lastCartonNo = cartonNo;
+            return cartonNo;
+          }
+          return lastCartonNo;
+        });
+
+        // 2. Build cartonCountMap using propagated carton numbers
+        const cartonCountMap: Record<string, number> = {};
+        effectiveCartonNos.forEach(cartonNo => {
+          if (!cartonNo) return;
+          cartonCountMap[cartonNo] = (cartonCountMap[cartonNo] || 0) + 1;
+        });
+
+        // 3. Write rows using propagated carton number for split-carton logic
+        // For merging: track start/end row for each carton group
+        const cartonRowRanges: Record<string, {start: number, end: number}> = {};
+        effectiveCartonNos.forEach((cartonNo, i) => {
+          const rowNum = mainTableStart + i;
+          if (!(cartonNo in cartonRowRanges)) {
+            cartonRowRanges[cartonNo] = { start: rowNum, end: rowNum };
+          } else {
+            cartonRowRanges[cartonNo].end = rowNum;
+          }
+        });
 
         // Copy formatting for new rows from the template's main table row (row 20 before insertion)
         const styleRow = ws.getRow(mainTableStart + numDataRows); // This is the original template row 20
@@ -147,7 +169,13 @@ function App() {
 
         dataRows.forEach((row, i) => {
           const rowNum = mainTableStart + i;
-          ws.getCell(`C${rowNum}`).value = safe(row, idxCaseNos); // Carton #
+          // 4. Only write Carton# for the first row in the group, else leave blank
+          const cartonNo = effectiveCartonNos[i];
+          if (cartonRowRanges[cartonNo].start === rowNum) {
+            ws.getCell(`C${rowNum}`).value = cartonNo;
+          } else {
+            ws.getCell(`C${rowNum}`).value = '';
+          }
 
           // Color (D)
           let color = safe(row, idxColor);
@@ -167,16 +195,33 @@ function App() {
           ws.getCell(`F${rowNum}`).value = typeof ecc === 'string' && (ecc.startsWith('X') || ecc.startsWith('L')) ? ecc : prevECC;
           prevECC = typeof ws.getCell(`F${rowNum}`).value === 'string' ? ws.getCell(`F${rowNum}`).value as string : '';
 
+          // --- SPLIT CARTON LOGIC FOR OS COLUMN ---
+          // For the OS column in the report:
+          //   - If split carton (carton number appears more than once), use value from Column J (index 9, 0-based)
+          //   - If single carton, use value from Column L (index 11, 0-based)
+          let osValue;
+          if (cartonNo && cartonCountMap[cartonNo] > 1) {
+            // Split carton: use Column J (index 9)
+            osValue = safe(row, 9);
+          } else {
+            // Single-color carton: use Column L (index 11)
+            osValue = safe(row, 11);
+          }
+          ws.getCell(`G${rowNum}`).value = osValue;
+
+          // Fill other size columns as before
           sizeNames.forEach((size, j) => {
             const idx = headerRow.indexOf(size);
             if (idx !== -1) {
+              // Only fill H, I, J, K, L, M, N (columns 8-14) if not OS (G)
+              if (j === 0) return; // skip OS, already filled
               ws.getCell(String.fromCharCode(71 + j) + rowNum).value = safe(row, idx);
             }
           });
 
           // Map report columns to uploaded file columns by letter
           // A=0, B=1, ..., L=11, M=12, N=13, O=14, P=15, Q=16, R=17, S=18, T=19, U=20
-          ws.getCell(`G${rowNum}`).value = safe(row, 11); // G = L
+          // ws.getCell(`G${rowNum}`).value = safe(row, 11); // G = L (replaced by split-carton logic above)
           ws.getCell(`N${rowNum}`).value = safe(row, 10); // N = K
           ws.getCell(`O${rowNum}`).value = safe(row, 12); // O = M
           ws.getCell(`P${rowNum}`).value = safe(row, 14); // P = O
@@ -186,6 +231,18 @@ function App() {
           ws.getCell(`T${rowNum}`).value = safe(row, 19); // T = T
           ws.getCell(`U${rowNum}`).value = safe(row, 20); // U = U
           ws.getCell(`V${rowNum}`).value = safe(row, 20); // V = U
+        });
+
+        // 5. Merge Carton# cells for each group in the worksheet
+        Object.values(cartonRowRanges).forEach(({start, end}) => {
+          if (end > start) {
+            ws.mergeCells(`C${start}:C${end}`);
+            // Also merge columns N–V for this group
+            const colLetters = ['N','O','P','Q','R','S','T','U','V'];
+            colLetters.forEach(col => {
+              ws.mergeCells(`${col}${start}:${col}${end}`);
+            });
+          }
         });
 
         
@@ -234,23 +291,26 @@ function App() {
         const colorMap: Record<string, number[]> = {};
         // Map each size to its worksheet column letter (adjusted for your template)
         const sizeColLetters = ['G', 'H', 'I', 'J', 'K', 'L', 'M']; // OS, XS, S, M, L, XL, XXL
-        const unitsCrtCol = 'N'; // Units/CRT is in column N
         for (let i = 0; i < numDataRows; i++) {
           const rowNum = mainTableStart + i;
           const color = ws.getCell(`D${rowNum}`).value?.toString().trim() || '';
           if (!color) continue;
           if (!colorMap[color]) colorMap[color] = [0,0,0,0,0,0,0];
-          const unitsCRT = parseFloat(String(ws.getCell(`${unitsCrtCol}${rowNum}`).value)) || 0;
-          for (let j = 0; j < 7; j++) {
-            const colLetter = sizeColLetters[j];
-            const sizeVal = parseFloat(String(ws.getCell(`${colLetter}${rowNum}`).value)) || 0;
-            const product = sizeVal * unitsCRT;
-            colorMap[color][j] += product;
-            console.log(`Row ${rowNum}, Color: ${color}, Size: ${sizeNames[j]}, Col: ${colLetter}, SizeVal: ${sizeVal}, UnitsCRT: ${unitsCRT}, Product: ${product}`);
+          const cartonNo = effectiveCartonNos[i];
+          // OS column (index 0): use split carton logic
+          if (cartonNo && cartonCountMap[cartonNo] > 1) {
+            // Split carton: use OS (G)
+            colorMap[color][0] += parseFloat(ws.getCell(`G${rowNum}`).value as string) || 0;
+          } else {
+            // Single carton: use Total Unit (O)
+            colorMap[color][0] += parseFloat(ws.getCell(`O${rowNum}`).value as string) || 0;
+          }
+          // Other sizes: use previous logic (from worksheet columns)
+          for (let j = 1; j < 7; j++) {
+            const cellVal = parseFloat(ws.getCell(`${sizeColLetters[j]}${rowNum}`).value as string) || 0;
+            colorMap[color][j] += cellVal;
           }
         }
-        console.log('colorMap for breakdown (from worksheet):', colorMap);
-
         // --- DYNAMIC COLOR BREAKDOWN TABLE ---
         // Place color breakdown headers adjacent to the Total Carton row in the summary
         const colorBreakdownStartRow = summaryStartRow + 1; // This is the Total Carton row
