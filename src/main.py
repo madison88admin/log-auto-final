@@ -80,6 +80,11 @@ def extract_tables(file_bytes):
             print('Header row:', header_row)
             print('Mapped keys:', mapped_keys)
             table_data = []
+            size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
+            size_indices = {}
+            for i, key in enumerate(mapped_keys):
+                if key in size_names:
+                    size_indices[key] = i
             for data_row in table_rows[1:]:
                 # Skip rows that are completely empty
                 if all((cell is None or str(cell).strip() == "" or str(cell).lower() == "nan") for cell in data_row):
@@ -92,6 +97,10 @@ def extract_tables(file_bytes):
                     row_dict['Width'] = data_row[18]
                 if len(data_row) > 19:
                     row_dict['Height'] = data_row[19]
+                # Dynamically map each size column to its own key
+                for size, idx in size_indices.items():
+                    if idx is not None and idx < len(data_row):
+                        row_dict[size] = data_row[idx]
                 # Only include rows with at least one main data field filled
                 if any(str(row_dict.get(f, '')).strip() not in ['', 'nan', 'None'] for f in main_data_fields):
                     table_data.append(row_dict)
@@ -126,9 +135,12 @@ def copy_worksheet(template_ws, target_ws):
 
 def safe_float(val):
     try:
-        return float(val)
+        f = float(val)
+        if f != f:  # NaN check
+            return 0
+        return f
     except (ValueError, TypeError):
-        return 0.0
+        return 0
 
 def fill_template_with_data(ws, rows, group_name):
     if not rows:
@@ -252,11 +264,69 @@ def fill_template_with_data(ws, rows, group_name):
         ws.cell(row=row_num, column=21, value=cbm_value)  # U: CBM
         ws.cell(row=row_num, column=22, value=cbm_value)  # V: TOTAL CBM
 
-    # --- Only merge Carton# and N–V columns (do not merge D/E/F) ---
+    # --- SUMMARY AND COLOR BREAKDOWN (replicate frontend logic) ---
+    # Always write summary and color breakdown at fixed positions after the main table
+    size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
+    main_table_start = 20
+    num_data_rows = len(rows)
+    summary_start_row = main_table_start + num_data_rows + 1
+    summary_col = 4  # D
+    value_col = 5    # E
+    color_breakdown_col = 6  # F
+
+    # --- SUMMARY TABLE CALCULATION AND WRITING ---
+    main_table_end_row = main_table_start + len(rows) - 1
+    # Check if there are any empty cells in column N (14)
+    any_empty = any(ws.cell(row=row, column=14).value in [None, '', 'nan', 'None', 0, '0'] for row in range(main_table_start, main_table_end_row + 1))
+    # Use copy-down sum if there are empty cells, else use direct sum
+    if any_empty:
+        total_carton, _ = copy_down_sum(ws, main_table_start, main_table_end_row, 14)
+        print('DEBUG: Used copy-down sum for total_carton')
+    else:
+        total_carton = sum(
+            int(ws.cell(row=row, column=14).value) if str(ws.cell(row=row, column=14).value).isdigit() else 0
+            for row in range(main_table_start, main_table_end_row + 1)
+        )
+        print('DEBUG: Used direct sum for total_carton')
+    # Sum of Net Weight (Column P = 16)
+    total_net_weight = sum(
+        safe_float(ws.cell(row=row, column=16).value)
+        for row in range(main_table_start, main_table_end_row + 1)
+    )
+    # Sum of Gross Weight (Column Q = 17)
+    total_gross_weight = sum(
+        safe_float(ws.cell(row=row, column=17).value)
+        for row in range(main_table_start, main_table_end_row + 1)
+    )
+    # Sum of Total CBM (Column V = 22)
+    total_cbm = sum(
+        safe_float(ws.cell(row=row, column=22).value)
+        for row in range(main_table_start, main_table_end_row + 1)
+    )
+
+    # Write these values to the summary table
+    print(f"DEBUG: Writing summary values: Total Carton={total_carton} (row {summary_start_row+1}, col {value_col}), Net Weight={total_net_weight}, Gross Weight={total_gross_weight}, CBM={total_cbm}")
+    ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
+    ws.cell(row=summary_start_row+1, column=value_col, value=total_carton)
+    ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight')
+    ws.cell(row=summary_start_row+2, column=value_col, value=total_net_weight)
+    ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight')
+    ws.cell(row=summary_start_row+3, column=value_col, value=total_gross_weight)
+    ws.cell(row=summary_start_row+4, column=summary_col, value='Total CBM')
+    ws.cell(row=summary_start_row+4, column=value_col, value=total_cbm)
+
+    # Debug print after all processing, just before saving
+    print("DEBUG: Final summary cell values:",
+        ws.cell(row=summary_start_row+1, column=value_col).value,
+        ws.cell(row=summary_start_row+2, column=value_col).value,
+        ws.cell(row=summary_start_row+3, column=value_col).value,
+        ws.cell(row=summary_start_row+4, column=value_col).value)
+
+    # --- Only merge Carton# and columns O–V (15–22), but NOT N (14)
     for carton_no, rng in carton_row_ranges.items():
         if carton_no and carton_no.lower() != 'nan' and rng['end'] > rng['start']:
             ws.merge_cells(start_row=rng['start'], start_column=3, end_row=rng['end'], end_column=3)
-            for col in range(14, 23):  # N–V
+            for col in range(15, 23):  # O–V (skip N=14)
                 ws.merge_cells(start_row=rng['start'], start_column=col, end_row=rng['end'], end_column=col)
 
     # --- SUMMARY AND COLOR BREAKDOWN (replicate frontend logic) ---
@@ -275,6 +345,9 @@ def fill_template_with_data(ws, rows, group_name):
     main_table_end_row = main_table_start + num_data_rows - 1
     clear_start_row = main_table_end_row + 1
     clear_end_row = summary_start_row + 20
+    for row in range(main_table_start, main_table_end_row + 1):
+        for col in range(3, 23):  # C (3) to V (22)
+            ws.cell(row=row, column=col).alignment = Alignment(horizontal='center', vertical='center')
     for row in range(clear_start_row, clear_end_row):
         for col in range(4, 15):  # D to N (or further if needed)
             cell = ws.cell(row=row, column=col)
@@ -294,7 +367,7 @@ def fill_template_with_data(ws, rows, group_name):
             merged_range.max_col <= 15):
             ws.unmerge_cells(str(merged_range))
 
-    # --- SUMMARY SECTION ---image.png
+    # --- SUMMARY SECTION ---
     # Merge D and E for the summary name
     ws.merge_cells(start_row=summary_start_row, start_column=summary_col, end_row=summary_start_row, end_column=value_col)
     header_cell = ws.cell(row=summary_start_row, column=summary_col)
@@ -303,15 +376,36 @@ def fill_template_with_data(ws, rows, group_name):
     header_cell.font = Font(bold=True)
     header_cell.fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
 
+    # Find the last Carton# value in the data rows
+    carton_col = 3  # C
+    last_carton_cell = ws.cell(row=main_table_start + num_data_rows - 1, column=carton_col).value
+    processed_carton_value = last_carton_cell
+    if last_carton_cell and isinstance(last_carton_cell, str) and '-' in last_carton_cell:
+        parts = last_carton_cell.split('-')
+        processed_carton_value = parts[-1].strip()
+
+    # Sum columns P, Q, V, and N (Units/CRT) for the data rows
+    total_net_weight = 0
+    total_gross_weight = 0
+    total_cbm = 0
+    total_carton = 0  # Sum of Units/CRT (column N)
+    last_units_crt = None
+    for i in range(num_data_rows):
+        row_num = main_table_start + i
+        units_crt_val = ws.cell(row=row_num, column=14).value
+        if units_crt_val not in [None, '', 'nan', 'None', 0, '0']:
+            last_units_crt = units_crt_val
+        total_carton += safe_float(last_units_crt)
+
     # Write summary values (labels and values) below the summary header
     ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
-    ws.cell(row=summary_start_row+1, column=value_col, value=num_data_rows)
-    ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight (kg)')
-    ws.cell(row=summary_start_row+2, column=value_col, value=round(sum(safe_float(row.get('totalNw', 0)) for row in rows), 3))
-    ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight (kg)')
-    ws.cell(row=summary_start_row+3, column=value_col, value=round(sum(safe_float(row.get('totalGw', 0)) for row in rows), 3))
+    ws.cell(row=summary_start_row+1, column=value_col, value=round(total_carton, 3))
+    ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight')
+    ws.cell(row=summary_start_row+2, column=value_col, value=round(total_net_weight, 3))
+    ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight')
+    ws.cell(row=summary_start_row+3, column=value_col, value=round(total_gross_weight, 3))
     ws.cell(row=summary_start_row+4, column=summary_col, value='Total CBM')
-    ws.cell(row=summary_start_row+4, column=value_col, value=round(sum(safe_float(row.get('cbm', row.get('totalCbm', 0))) for row in rows),3))
+    ws.cell(row=summary_start_row+4, column=value_col, value=round(total_cbm, 3))
 
     # --- COLOR BREAKDOWN SECTION (replicating frontend split-carton logic) ---
     # Place color breakdown headers to align with the summary header row
@@ -342,30 +436,41 @@ def fill_template_with_data(ws, rows, group_name):
             continue
         carton_count_map[carton_no] = carton_count_map.get(carton_no, 0) + 1
 
-    # Calculate color breakdown data with split-carton logic for OS
+    # --- FIXED COLOR BREAKDOWN LOGIC ---
     color_map = {}
-    for i, row in enumerate(rows):
-        color = str(row.get('color', '')).strip()
-        if not color or color.lower() in ['nan', 'none']:
+    size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
+    size_col_indices = [7, 8, 9, 10, 11, 12, 13]  # G=7, H=8, ..., M=13 (1-based)
+    color_col = 4  # D=4 (1-based)
+    units_crt_col = 14  # N=14 (1-based)
+
+    # Propagate Units/CRT down for merged cells (if 0 or empty, copy from above)
+    last_units_crt = None
+    for i in range(num_data_rows):
+        row_num = main_table_start + i
+        cell = ws.cell(row=row_num, column=14)
+        val = cell.value
+        if val is not None and str(val).strip() not in ['', 'nan', 'None', '0']:
+            last_units_crt = val
+        else:
+            if not isinstance(cell, MergedCell):
+                cell.value = last_units_crt
+
+    for i in range(num_data_rows):
+        row_num = main_table_start + i
+        color = ws.cell(row=row_num, column=color_col).value
+        units_crt = safe_float(ws.cell(row=row_num, column=units_crt_col).value)
+        size_vals = [ws.cell(row=row_num, column=col).value for col in size_col_indices]
+        print(f"Row {i}: color={color}, units_crt={units_crt}, sizes={size_vals}")
+        if not color or str(color).strip().lower() in ['nan', 'none', '']:
             continue
+        color = str(color).strip()
         if color not in color_map:
             color_map[color] = [0] * len(size_names)
-        carton_no = effective_carton_nos[i]
-        # OS column (index 0): use split carton logic
-        if carton_no and carton_count_map[carton_no] > 1:
-            # Split carton: use OS value (unitsCrt)
-            os_val = safe_float(row.get('OS', row.get('unitsCrt', 0)))
-            color_map[color][0] += os_val
-        else:
-            # Single carton: use Total Unit value
-            os_val = safe_float(row.get('totalUnit', 0))
-            color_map[color][0] += os_val
-        # Other sizes: sum as before
-        for j, size in enumerate(size_names[1:], 1):
-            size_val = safe_float(row.get(size, 0))
-            color_map[color][j] += size_val
+        for j, size_col in enumerate(size_col_indices):
+            size_val = safe_float(ws.cell(row=row_num, column=size_col).value)
+            color_map[color][j] += size_val * units_crt
 
-    valid_colors = [color for color in color_map.keys() if color and color.strip().lower() not in ['nan', 'none']]
+    valid_colors = [color for color in color_map.keys() if color and color.lower() not in ['nan', 'none']]
 
     # Write color breakdown rows dynamically with borders
     for color_idx, color in enumerate(valid_colors):
@@ -401,58 +506,107 @@ def fill_template_with_data(ws, rows, group_name):
     grand_total_cell.alignment = Alignment(horizontal='center')
     grand_total_cell.border = header_border
 
-    # --- Dynamically extend the main report border to the last row of the color breakdown table ---
-    leftmost_col = color_breakdown_start_col
-    rightmost_col = color_breakdown_start_col + len(color_headers) - 1
-    thick_border = Border(bottom=Side(style='thick'))
-    for col in range(leftmost_col, rightmost_col + 1):
-        cell = ws.cell(row=total_row_num, column=col)
-        # Start with the thick bottom border
-        border = Border(
-            left=cell.border.left,
-            right=cell.border.right,
-            top=cell.border.top,
-            bottom=thick_border.bottom
-        )
-        # Add thick left border to the first column
-        if col == leftmost_col:
-            border = Border(
-                left=Side(style='thick'),
-                right=border.right,
-                top=border.top,
-                bottom=border.bottom
-            )
-        # Add thick right border to the last column
-        if col == rightmost_col:
-            border = Border(
-                left=border.left,
-                right=Side(style='thick'),
-                top=border.top,
-                bottom=border.bottom
-            )
-        cell.border = border
+    # --- Note: Removed dynamic thick border extension to avoid extra thick borders ---
 
     # --- Clear all borders in the top section (B2:W16) ---
     for row in range(2, 17):  # 2 to 16 inclusive
         for col in range(2, 24):  # B (2) to W (23)
             ws.cell(row=row, column=col).border = Border()
 
-    # --- Apply only the requested border ---
-    # Double border for cell C3 (Packing List)
-    ws['C3'].border = Border(
-        left=Side(style='double'),
-        right=Side(style='double'),
-        top=Side(style='double'),
-        bottom=Side(style='double')
-    )
+    # Clear borders in the area below the summary table, up to the start of the color breakdown or a safe buffer
+    for row in range(summary_start_row + 5, summary_start_row + 15):  # Adjust the end as needed
+        for col in range(2, 24):  # B (2) to W (23)
+            ws.cell(row=row, column=col).border = Border()
 
-    # --- Apply only the requested borders ---
-    # Double border for cell C3 (Packing List)
-    ws['C3'].border = Border(
-        left=Side(style='double'),
-        right=Side(style='double'),
-        top=Side(style='double'),
-        bottom=Side(style='double')
+    # --- Apply requested borders as per user instructions ---
+    # 1. Outer Thin Border from D6 to D12
+    thin_side = Side(style='thin')
+    for row in range(6, 13):  # D6 to D12 (rows 6-12)
+        for col in range(4, 5):  # D (4)
+            border = Border()
+            if row == 6:
+                border = Border(top=thin_side, left=thin_side, right=thin_side)
+            elif row == 12:
+                border = Border(bottom=thin_side, left=thin_side, right=thin_side)
+            else:
+                border = Border(left=thin_side, right=thin_side)
+            ws.cell(row=row, column=col).border = border
+
+    # 2. Borders (Not Thick) in cells D13 to E16
+    thin_border = Border(top=thin_side, left=thin_side, right=thin_side, bottom=thin_side)
+    for row in range(13, 17):  # 13 to 16
+        for col in range(4, 6):  # D (4) to E (5)
+            ws.cell(row=row, column=col).border = thin_border
+
+    # 3. Thin Border in the merged cell F6 to G16
+    for row in range(6, 17):
+        for col in range(6, 8):  # F (6) to G (7)
+            border = Border()
+            if row == 6:
+                border = Border(top=thin_side)
+            if row == 16:
+                border = Border(bottom=thin_side)
+            if col == 6:
+                border = Border(left=thin_side)
+            if col == 7:
+                border = Border(right=thin_side)
+            # Combine borders for corners and edges
+            if row == 6 and col == 6:
+                border = Border(top=thin_side, left=thin_side)
+            if row == 6 and col == 7:
+                border = Border(top=thin_side, right=thin_side)
+            if row == 16 and col == 6:
+                border = Border(bottom=thin_side, left=thin_side)
+            if row == 16 and col == 7:
+                border = Border(bottom=thin_side, right=thin_side)
+            if row > 6 and row < 16 and col == 6:
+                border = Border(left=thin_side)
+            if row > 6 and row < 16 and col == 7:
+                border = Border(right=thin_side)
+            ws.cell(row=row, column=col).border = border
+    ws.merge_cells(start_row=6, start_column=6, end_row=16, end_column=7)
+
+    # 4. Double line border from C3 to V3 (for merged cell containing "PACKING LIST")
+    double_side = Side(style='double')
+    
+    # First, unmerge any existing merged cells in this area to avoid conflicts
+    for merged_range in list(ws.merged_cells.ranges):
+        if (merged_range.min_row == 3 and merged_range.max_row == 3 and 
+            merged_range.min_col >= 3 and merged_range.max_col <= 22):
+            ws.unmerge_cells(str(merged_range))
+    
+    # Now merge the cells C3:V3
+    ws.merge_cells(start_row=3, start_column=3, end_row=3, end_column=22)
+    
+    # Apply complete double border to the merged cell
+    # Top border for all cells in the merged range
+    for col in range(3, 23):  # C (3) to V (22)
+        cell = ws.cell(row=3, column=col)
+        cell.border = Border(top=double_side)
+    
+    # Bottom border for all cells in the merged range
+    for col in range(3, 23):  # C (3) to V (22)
+        cell = ws.cell(row=3, column=col)
+        current_border = cell.border
+        cell.border = Border(
+            top=current_border.top,
+            left=current_border.left,
+            right=current_border.right,
+            bottom=double_side
+        )
+    
+    # Left border for the first cell (C3)
+    ws.cell(row=3, column=3).border = Border(
+        top=double_side,
+        left=double_side,
+        bottom=double_side
+    )
+    
+    # Right border for the last cell (V3)
+    ws.cell(row=3, column=22).border = Border(
+        top=double_side,
+        right=double_side,
+        bottom=double_side
     )
 
     # --- Apply thin borders to the main table (C20:V<end>) ---
@@ -475,7 +629,7 @@ def fill_template_with_data(ws, rows, group_name):
 
     # --- Draw a robust thick outer border around the entire report area ---
     top_row = 2
-    bottom_row = total_row_num + 1  # last row of color breakdown
+    bottom_row = total_row_num + 2  # last row of color breakdown
     left_col = 2  # Column B
     right_col = 23  # Column W
 
@@ -493,6 +647,15 @@ def fill_template_with_data(ws, rows, group_name):
             right=ws.cell(row=bottom_row, column=col).border.right,
             top=ws.cell(row=bottom_row, column=col).border.top
         )
+        
+    for row in range(bottom_row + 1, bottom_row + 20):  # Adjust 20 as a safe buffer
+        for col in range(left_col, right_col + 1):
+            ws.cell(row=row, column=col).border = Border()
+
+# --- Clear borders above the thick top border (row 1 to top_row-1) ---
+    for row in range(1, top_row):
+        for col in range(left_col, right_col + 1):
+            ws.cell(row=row, column=col).border = Border()
 
     # Left and right borders
     for row in range(top_row, bottom_row + 1):
@@ -520,6 +683,19 @@ def robust_copy_down(rows, keys):
                 row[k] = last_values[k]
             else:
                 last_values[k] = val
+
+def copy_down_sum(ws, start_row, end_row, col):
+    last_val = 0
+    total = 0
+    empty_found = False
+    for row in range(start_row, end_row + 1):
+        val = ws.cell(row=row, column=col).value
+        if val not in [None, '', 'nan', 'None', 0, '0']:
+            last_val = float(val)
+        else:
+            empty_found = True
+        total += last_val
+    return total, empty_found
 
 # In generate_reports, skip NaN/Unknown group keys
 @app.post("/generate-reports/")
