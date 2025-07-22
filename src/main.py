@@ -68,7 +68,7 @@ def extract_tables(file_bytes):
     ]
     for sheet_name in xls.sheet_names:
         df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None, dtype=str)
-        header_indices = [i for i, row in df_raw.iterrows() if str(row.iloc[0]).strip() == "CASE NOS" or str(row.iloc[0]).strip() == "Carton#"]
+        header_indices = [i for i, row in df_raw.iterrows() if any(str(cell).strip() == "CASE NOS" for cell in row)]
         for idx, header_idx in enumerate(header_indices):
             start = header_idx
             end = header_indices[idx + 1] if idx + 1 < len(header_indices) else len(df_raw)
@@ -79,6 +79,7 @@ def extract_tables(file_bytes):
             mapped_keys = [HEADER_MAPPING.get(str(h).strip(), str(h).strip()) for h in header_row]
             print('Header row:', header_row)
             print('Mapped keys:', mapped_keys)
+            # Find all contiguous non-blank rows after the header
             table_data = []
             size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
             size_indices = {}
@@ -86,9 +87,9 @@ def extract_tables(file_bytes):
                 if key in size_names:
                     size_indices[key] = i
             for data_row in table_rows[1:]:
-                # Skip rows that are completely empty
+                # Stop at the first completely blank row
                 if all((cell is None or str(cell).strip() == "" or str(cell).lower() == "nan") for cell in data_row):
-                    continue
+                    break
                 row_dict = {mapped_keys[i]: data_row[i] if i < len(data_row) else "" for i in range(len(header_row))}
                 # Assign Length, Width, Height from R, S, T columns (Excel columns 18, 19, 20; Python indices 17, 18, 19)
                 if len(data_row) > 17:
@@ -108,9 +109,21 @@ def extract_tables(file_bytes):
                 print('Sample data row:', table_data[0])
             if not table_data:
                 continue
-            sheet_name = next((row.get('sa4PoNo', '') or row.get('cartonNo', '') for row in table_data if row.get('sa4PoNo', '') or row.get('cartonNo', '')), f'Table{len(tables)+1}')
-            safe_name = re.sub(r'[:\\/?*\[\]]', '_', str(sheet_name))[:31]
-            tables.append({'rows': table_data, 'sheet_name': safe_name})
+            # Find the column index of 'CASE NOS' in the header row
+            case_nos_col = None
+            for col_idx, cell in enumerate(df_raw.iloc[header_idx]):
+                if str(cell).strip() == "CASE NOS":
+                    case_nos_col = col_idx
+                    print(f"[DEBUG] Found 'CASE NOS' at column {case_nos_col}")
+                    break
+            # Extract model name from two rows above the CASE NOS header, same column
+            model_name = ''
+            if case_nos_col is not None and header_idx >= 2:
+                model_name = str(df_raw.iloc[header_idx - 2, case_nos_col])
+                print(f"[DEBUG] model_name (2 rows above header, col {case_nos_col}): {model_name}")
+            sheet_name_val = next((row.get('sa4PoNo', '') or row.get('cartonNo', '') for row in table_data if row.get('sa4PoNo', '') or row.get('cartonNo', '')), f'Table{len(tables)+1}')
+            safe_name = re.sub(r'[:\\/?*\[\]]', '_', str(sheet_name_val))[:31]
+            tables.append({'rows': table_data, 'sheet_name': safe_name, 'model_name': model_name})
     return tables
 
 def copy_worksheet(template_ws, target_ws):
@@ -142,7 +155,7 @@ def safe_float(val):
     except (ValueError, TypeError):
         return 0
 
-def fill_template_with_data(ws, rows, group_name):
+def fill_template_with_data(ws, rows, group_name, model_name=None):
     if not rows:
         return
     # Fill header fields (adjust cell addresses as needed)
@@ -154,20 +167,12 @@ def fill_template_with_data(ws, rows, group_name):
     ws['D16'] = po_line_value
     # Set SAP PO# (E14) and PO NO# to sheet name
     ws['E14'] = group_name
-    # --- Model Name logic: match frontend (App.tsx) ---
-    model_name = ''
-    for i in range(len(rows)):
-        case_nos_val = str(rows[i].get('caseNos', '')).lower()
-        if 'case' in case_nos_val:
-            if i - 2 >= 0:
-                model_name = rows[i-2].get('caseNos', '')
-            break
-    # Prefer the modelName field if available
-    if rows and rows[0].get('modelName'):
-        model_name = rows[0]['modelName']
-
-    # Set Model Name (E16) in the worksheet
-    ws['E16'] = model_name
+    # Always use the passed-in model_name for E16
+    if model_name is not None:
+        print(f"[DEBUG] Setting model_name in E16: {model_name}")
+        ws['E16'] = model_name
+    else:
+        ws['E16'] = ''
     ws['E7'] = ''
 
     # Main table starts at row 20 (C20)
@@ -255,16 +260,20 @@ def fill_template_with_data(ws, rows, group_name):
 
         ws.cell(row=row_num, column=14, value=row.get('carton', ''))      # N: Carton
         ws.cell(row=row_num, column=15, value=row.get('totalUnit', ''))   # O: Total Unit
-        ws.cell(row=row_num, column=16, value=safe_float(row.get('totalNw', 0)))  # P: TOTAL N.W.
-        ws.cell(row=row_num, column=17, value=safe_float(row.get('totalGw', 0)))  # Q: TOTAL G.W.
+        # P: TOTAL N.W. (rounded to nearest 10)
+        total_nw = safe_float(row.get('totalNw', 0))
+        ws.cell(row=row_num, column=16, value=round(total_nw, -1) if total_nw else 0)
+        # Q: TOTAL G.W. (rounded to nearest 10)
+        total_gw = safe_float(row.get('totalGw', 0))
+        ws.cell(row=row_num, column=17, value=round(total_gw, -1) if total_gw else 0)
         ws.cell(row=row_num, column=18, value=row.get('Length', ''))    # R: Length
         ws.cell(row=row_num, column=19, value=row.get('Width', ''))     # S: Width
         ws.cell(row=row_num, column=20, value=row.get('Height', ''))    # T: Height
+        # U: CBM (rounded to nearest 10)
         cbm_value = safe_float(row.get('cbm', row.get('totalCbm', 0)))
         ws.cell(row=row_num, column=21, value=cbm_value)  # U: CBM
         ws.cell(row=row_num, column=22, value=cbm_value)  # V: TOTAL CBM
 
-    # --- SUMMARY AND COLOR BREAKDOWN (replicate frontend logic) ---
     # Always write summary and color breakdown at fixed positions after the main table
     size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
     main_table_start = 20
@@ -274,53 +283,6 @@ def fill_template_with_data(ws, rows, group_name):
     value_col = 5    # E
     color_breakdown_col = 6  # F
 
-    # --- SUMMARY TABLE CALCULATION AND WRITING ---
-    main_table_end_row = main_table_start + len(rows) - 1
-    # Check if there are any empty cells in column N (14)
-    any_empty = any(ws.cell(row=row, column=14).value in [None, '', 'nan', 'None', 0, '0'] for row in range(main_table_start, main_table_end_row + 1))
-    # Use copy-down sum if there are empty cells, else use direct sum
-    if any_empty:
-        total_carton, _ = copy_down_sum(ws, main_table_start, main_table_end_row, 14)
-        print('DEBUG: Used copy-down sum for total_carton')
-    else:
-        total_carton = sum(
-            int(ws.cell(row=row, column=14).value) if str(ws.cell(row=row, column=14).value).isdigit() else 0
-            for row in range(main_table_start, main_table_end_row + 1)
-        )
-        print('DEBUG: Used direct sum for total_carton')
-    # Sum of Net Weight (Column P = 16)
-    total_net_weight = sum(
-        safe_float(ws.cell(row=row, column=16).value)
-        for row in range(main_table_start, main_table_end_row + 1)
-    )
-    # Sum of Gross Weight (Column Q = 17)
-    total_gross_weight = sum(
-        safe_float(ws.cell(row=row, column=17).value)
-        for row in range(main_table_start, main_table_end_row + 1)
-    )
-    # Sum of Total CBM (Column V = 22)
-    total_cbm = sum(
-        safe_float(ws.cell(row=row, column=22).value)
-        for row in range(main_table_start, main_table_end_row + 1)
-    )
-
-    # Write these values to the summary table
-    print(f"DEBUG: Writing summary values: Total Carton={total_carton} (row {summary_start_row+1}, col {value_col}), Net Weight={total_net_weight}, Gross Weight={total_gross_weight}, CBM={total_cbm}")
-    ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
-    ws.cell(row=summary_start_row+1, column=value_col, value=total_carton)
-    ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight')
-    ws.cell(row=summary_start_row+2, column=value_col, value=total_net_weight)
-    ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight')
-    ws.cell(row=summary_start_row+3, column=value_col, value=total_gross_weight)
-    ws.cell(row=summary_start_row+4, column=summary_col, value='Total CBM')
-    ws.cell(row=summary_start_row+4, column=value_col, value=total_cbm)
-
-    # Debug print after all processing, just before saving
-    print("DEBUG: Final summary cell values:",
-        ws.cell(row=summary_start_row+1, column=value_col).value,
-        ws.cell(row=summary_start_row+2, column=value_col).value,
-        ws.cell(row=summary_start_row+3, column=value_col).value,
-        ws.cell(row=summary_start_row+4, column=value_col).value)
 
     # --- Only merge Carton# and columns O–V (15–22), but NOT N (14)
     for carton_no, rng in carton_row_ranges.items():
@@ -396,6 +358,36 @@ def fill_template_with_data(ws, rows, group_name):
         if units_crt_val not in [None, '', 'nan', 'None', 0, '0']:
             last_units_crt = units_crt_val
         total_carton += safe_float(last_units_crt)
+    
+    # --- SUMMARY TABLE CALCULATION AND WRITING ---
+    main_table_end_row = main_table_start + len(rows) - 1
+    # Check if there are any empty cells in column N (14)
+    any_empty = any(ws.cell(row=row, column=14).value in [None, '', 'nan', 'None', 0, '0'] for row in range(main_table_start, main_table_end_row + 1))
+    # Use copy-down sum if there are empty cells, else use direct sum
+    if any_empty:
+        total_carton, _ = copy_down_sum(ws, main_table_start, main_table_end_row, 14)
+        print('DEBUG: Used copy-down sum for total_carton')
+    else:
+        total_carton = sum(
+            int(ws.cell(row=row, column=14).value) if str(ws.cell(row=row, column=14).value).isdigit() else 0
+            for row in range(main_table_start, main_table_end_row + 1)
+        )
+        print('DEBUG: Used direct sum for total_carton')
+    # Sum of Net Weight (Column P = 16)
+    total_net_weight = sum(
+        safe_float(ws.cell(row=row, column=16).value)
+        for row in range(main_table_start, main_table_end_row + 1)
+    )
+    # Sum of Gross Weight (Column Q = 17)
+    total_gross_weight = sum(
+        safe_float(ws.cell(row=row, column=17).value)
+        for row in range(main_table_start, main_table_end_row + 1)
+    )
+    # Sum of Total CBM (Column V = 22)
+    total_cbm = sum(
+        safe_float(ws.cell(row=row, column=22).value)
+        for row in range(main_table_start, main_table_end_row + 1)
+    )
 
     # Write summary values (labels and values) below the summary header
     ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
@@ -615,12 +607,16 @@ def fill_template_with_data(ws, rows, group_name):
     main_table_end_row = main_table_start + num_data_rows - 1
     for row in range(main_table_start, main_table_end_row + 1):
         for col in range(3, 23):  # C (3) to V (22)
-            ws.cell(row=row, column=col).border = thin_border
+            cell = ws.cell(row=row, column=col)
+            cell.border = thin_border
+            cell.font = Font(bold=False)  # Ensure not bold
 
     # --- Apply thin borders to the summary table (D/E, summary_start_row+1 to summary_start_row+4) ---
     for row in range(summary_start_row + 1, summary_start_row + 5):
         for col in range(4, 6):  # D (4) and E (5)
-            ws.cell(row=row, column=col).border = thin_border
+            cell = ws.cell(row=row, column=col)
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal='center', vertical='center')  # Center align
 
     # --- Apply thin borders to the color breakdown table (F to O, color_breakdown_start_row to total_row_num) ---
     for row in range(color_breakdown_start_row, total_row_num + 1):
@@ -705,6 +701,7 @@ async def generate_reports(
 ):
     print("LOG TEST: /generate-reports endpoint called")
     file_bytes = await file.read()
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
     tables = extract_tables(io.BytesIO(file_bytes))
     template_wb = load_workbook("ReportTemplate.xlsx")
     template_ws = template_wb['Report']
@@ -724,7 +721,25 @@ async def generate_reports(
             continue
         ws = combined_wb.create_sheet(title=table['sheet_name'])
         copy_worksheet(template_ws, ws)
-        fill_template_with_data(ws, table['rows'], table['sheet_name'])
+        fill_template_with_data(ws, table['rows'], table['sheet_name'], table['model_name'])
+        # Copy C15–C20 from the input file to merged cell F6–G16
+        try:
+            input_sheet = None
+            for sname in xls.sheet_names:
+                if sname.strip().lower() == table['sheet_name'].strip().lower() or sname.strip().lower() in ['in', 'pk (2)']:
+                    input_sheet = pd.read_excel(xls, sheet_name=sname, header=None, dtype=str)
+                    break
+            if input_sheet is not None:
+                merged_text_lines = []
+                for row_idx in range(14, 20):
+                    val = input_sheet.iloc[row_idx, 2] if row_idx < len(input_sheet) else ''
+                    if pd.notna(val) and str(val).strip():
+                        merged_text_lines.append(str(val).strip())
+                merged_text = '\n'.join(merged_text_lines)
+                ws.merge_cells(start_row=6, start_column=6, end_row=16, end_column=7)
+                ws.cell(row=6, column=6).value = merged_text
+        except Exception as e:
+            print(f"[DEBUG] Error copying C15-C20 to F6-G16: {e}")
     output = io.BytesIO()
     combined_wb.save(output)
     output.seek(0)

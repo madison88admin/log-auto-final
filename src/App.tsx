@@ -18,12 +18,13 @@ function App() {
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [generatedExcelBuffer, setGeneratedExcelBuffer] = useState<ArrayBuffer | null>(null);
-  const [parsedTables, setParsedTables] = useState<{ table: any[][], modelName: string }[]>([]);
-  const [selectedTableIdx, setSelectedTableIdx] = useState(0);
+  const [parsedTables, setParsedTables] = useState<{ table: any[][], modelName: string, mergedCellText?: string }[]>([]);  const [selectedTableIdx, setSelectedTableIdx] = useState(0);
   // Add state to store all generated report buffers
   const [reportBuffers, setReportBuffers] = useState<ArrayBuffer[]>([]);
   // Add state to store sheet names for download
   const [reportSheetNames, setReportSheetNames] = useState<string[]>([]);
+  // Add state for merged cell preview
+  const [mergedCellText, setMergedCellText] = useState<string>('');
 
   const handleFileUpload = (file: File) => {
     setUploadedFile(file);
@@ -32,6 +33,7 @@ function App() {
     setError(null);
     setParsedTables([]);
     setSelectedTableIdx(0);
+    setMergedCellText('');
   };
 
   // Helper to generate all report buffers and sheet names
@@ -436,31 +438,6 @@ function App() {
     }
   };
 
-  // Add a new function to generate and download all reports as a zip
-  const handleDownloadAllReportsAsZip = async () => {
-    if (!parsedTables.length || !uploadedFile) return;
-    setIsProcessing(true);
-    setError(null);
-    try {
-      const baseName = (uploadedFile?.name || 'Report').replace(/\.xlsx?$/i, '');
-      const zip = new JSZip();
-      // Use the shared helper
-      const { buffers, sheetNames } = await generateAllReportBuffers(parsedTables, uploadedFile);
-      for (let i = 0; i < buffers.length; i++) {
-        zip.file(`${baseName}-${sheetNames[i]}.xlsx`, buffers[i]);
-      }
-      // Generate the zip and trigger download
-      const zipBlob = await zip.generateAsync({ type: 'blob' });
-      saveAs(zipBlob, `${baseName}-AllReports.zip`);
-      setReportBuffers(buffers);
-      setReportSheetNames(sheetNames);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred while zipping the reports');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
   // Add a function to download a single report
   const handleDownloadSingleReport = (idx: number) => {
     if (!reportBuffers[idx] || !reportSheetNames[idx]) return;
@@ -496,7 +473,9 @@ function App() {
       if (!response.ok) throw new Error('Failed to generate combined report');
 
       const blob = await response.blob();
-      saveAs(blob, 'AllReports.xlsx');
+      // Use uploaded file name + 'Report.xlsx' for the download
+      const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
+      saveAs(blob, `${baseName}Report.xlsx`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred while exporting the combined report');
     } finally {
@@ -561,7 +540,10 @@ function App() {
                   <ExcelHandsontablePreview
                     excelFile={uploadedFile}
                     title="PK Table"
-                    onTablesExtracted={setParsedTables}
+                    onTablesExtracted={tables => {
+                      setParsedTables(tables);
+                      setMergedCellText(tables[0]?.mergedCellText || '');
+                    }}
                     onSelectedTableChange={(_table, _modelName) => {
                       // Find the index of the selected table
                       const idx = parsedTables.findIndex(t => t.table === _table && t.modelName === _modelName);
@@ -569,7 +551,34 @@ function App() {
                     }}
                   />
                 </div>
-                <div className="flex-1 min-w-0">
+                <div className="flex-1 min-w-0 flex flex-col">
+                  {mergedCellText && (
+                    <div style={{
+                      margin: '0 0 16px 0',
+                      padding: '16px 20px',
+                      background: 'linear-gradient(90deg, #f8fafc 80%, #e0e7ef 100%)',
+                      border: '1.5px solid #cbd5e1',
+                      borderRadius: 10,
+                      fontFamily: 'Inter, Segoe UI, Arial, sans-serif',
+                      whiteSpace: 'pre-line',
+                      minHeight: 48,
+                      fontSize: 14,
+                      color: '#222',
+                      alignSelf: 'stretch',
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.07)',
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 12,
+                    }}>
+                      <span style={{ display: 'flex', alignItems: 'center', marginRight: 8 }}>
+                        <svg width="20" height="20" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24" style={{ marginRight: 6 }}><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h5"/></svg>
+                        <b style={{ fontWeight: 600, color: '#2563eb', fontSize: 15 }}>Ship to:</b>
+                      </span>
+                      <span style={{ flex: 1, fontWeight: 500 }}>{mergedCellText}</span>
+                    </div>
+                  )}
                   {reportBuffers[selectedTableIdx] && (
                     <LuckysheetPreview
                       excelBlob={new Blob([reportBuffers[selectedTableIdx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })}
@@ -595,29 +604,21 @@ function App() {
                 Export Single Report{reportSheetNames[selectedTableIdx] ? ` - ${reportSheetNames[selectedTableIdx]}` : ''}
               </button>
               <button
-                onClick={handleDownloadAllReportsAsZip}
-                className="btn-primary flex items-center gap-2"
-              >
-                {/* Zip/file icon */}
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
-                Export All as Zip
-              </button>
-              <button
-                onClick={handleReset}
-                className="btn-secondary flex items-center gap-2"
-              >
-                {/* Refresh/plus icon */}
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
-                Process New File
-              </button>
-              {/* Add the new Export All as Single Excel button here */}
-              <button
                 onClick={handleExportAllAsSingleExcel}
                 className="btn-primary flex items-center gap-2"
               >
                 {/* Excel icon */}
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
-                Export All as Single Excel
+                Export All
+              </button>
+              <button
+                onClick={handleReset}
+                className="btn-secondary flex items-center gap-2"
+                style={{ marginLeft: 'auto' }}
+              >
+                {/* Refresh/plus icon */}
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+                Process New File
               </button>
             </div>
           )}
