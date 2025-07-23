@@ -465,7 +465,8 @@ function App() {
       const formData = new FormData();
       formData.append('file', uploadedFile);
 
-      const response = await fetch('http://localhost:8000/generate-reports/', {
+      const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${API_URL}/generate-reports/`, {
         method: 'POST',
         body: formData,
       });
