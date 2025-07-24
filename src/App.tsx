@@ -465,7 +465,7 @@ function App() {
       const formData = new FormData();
       formData.append('file', uploadedFile);
 
-      const API_URL = process.env.REACT_APP_API_URL;
+      const API_URL = import.meta.env.VITE_API_URL || 'https://log-auto-final-python.onrender.com';
       console.log('API_URL:', API_URL);
       const response = await fetch(`${API_URL}/generate-reports/`, {
         method: 'POST',
