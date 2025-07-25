@@ -264,6 +264,9 @@ function App() {
         // --- TOTAL CARTON LOGIC: sum only the first non-empty cell of each merged group in Column N ---
         let totalCarton = 0;
         let prevCartonVal = null;
+        let totalNetWeight = 0;
+        let totalGrossWeight = 0;
+        let totalCBM = 0;
         for (let i = 0; i < numDataRows; i++) {
           const rowNum = mainTableStart + i;
           const cartonVal = ws.getRow(rowNum).getCell(14).value;
@@ -275,6 +278,10 @@ function App() {
             cartonVal !== prevCartonVal
           ) {
             totalCarton += Number(cartonVal);
+            // Only sum these columns for the first row of each merged group
+            totalNetWeight += parseFloat(ws.getCell(`P${rowNum}`).value as string) || 0;
+            totalGrossWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
+            totalCBM += parseFloat(ws.getCell(`V${rowNum}`).value as string) || 0;
             prevCartonVal = cartonVal;
           }
         }
@@ -287,16 +294,6 @@ function App() {
         ws.getCell(`D${summaryStartRow}`).value = 'Summary';
         ws.getCell(`D${summaryStartRow}`).alignment = { horizontal: 'center', vertical: 'middle' };
 
-        // Calculate summary values from the report columns
-        let totalNetWeight = 0;
-        let totalGrossWeight = 0;
-        let totalCBM = 0;
-        for (let i = 0; i < numDataRows; i++) {
-          const rowNum = mainTableStart + i;
-          totalNetWeight += parseFloat(ws.getCell(`P${rowNum}`).value as string) || 0;
-          totalGrossWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
-          totalCBM += parseFloat(ws.getCell(`V${rowNum}`).value as string) || 0;
-        }
         // Write summary titles in D, values in E
         ws.getCell(`D${summaryStartRow + 1}`).value = 'Total Carton';
         ws.getCell(`E${summaryStartRow + 1}`).value = totalCarton;
@@ -479,7 +476,7 @@ function App() {
       if (!response.ok) throw new Error('Failed to generate combined report');
 
       const blob = await response.blob();
-      // setGeneratedReportBlob(blob); // <-- Store backend-generated Blob
+      
       // Use uploaded file name + 'Report.xlsx' for the download
       const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
       saveAs(blob, `${baseName}Report.xlsx`);
