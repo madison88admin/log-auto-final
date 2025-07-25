@@ -25,6 +25,8 @@ function App() {
   const [reportSheetNames, setReportSheetNames] = useState<string[]>([]);
   // Add state for merged cell preview
   const [mergedCellText, setMergedCellText] = useState<string>('');
+  // 1. Add state variable for backend-generated Blob
+  const [generatedReportBlob, setGeneratedReportBlob] = useState<Blob | null>(null);
 
   const handleFileUpload = (file: File) => {
     setUploadedFile(file);
@@ -446,17 +448,7 @@ function App() {
     saveAs(new Blob([reportBuffers[idx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), fileName);
   };
 
-  const handleReset = () => {
-    setUploadedFile(null);
-    setProcessingResult(null);
-    setGeneratedExcelBuffer(null);
-    setError(null);
-    setIsProcessing(false);
-    setParsedTables([]);
-    setSelectedTableIdx(0);
-  };
-
-  // Add the handler function if not present
+  // 2. In handleExportAllAsSingleExcel, set the Blob
   const handleExportAllAsSingleExcel = async () => {
     if (!uploadedFile) return;
     setIsProcessing(true);
@@ -475,6 +467,7 @@ function App() {
       if (!response.ok) throw new Error('Failed to generate combined report');
 
       const blob = await response.blob();
+      setGeneratedReportBlob(blob); // <-- Store backend-generated Blob
       // Use uploaded file name + 'Report.xlsx' for the download
       const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
       saveAs(blob, `${baseName}Report.xlsx`);
@@ -483,6 +476,19 @@ function App() {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // 4. Reset the Blob in handleReset
+  const handleReset = () => {
+    setUploadedFile(null);
+    setProcessingResult(null);
+    setGeneratedExcelBuffer(null);
+    setError(null);
+    setIsProcessing(false);
+    setParsedTables([]);
+    setSelectedTableIdx(0);
+    setMergedCellText('');
+    setGeneratedReportBlob(null); // <-- Reset backend-generated Blob
   };
 
   return (
@@ -581,10 +587,8 @@ function App() {
                       <span style={{ flex: 1, fontWeight: 500 }}>{mergedCellText}</span>
                     </div>
                   )}
-                  {reportBuffers[selectedTableIdx] && (
-                    <LuckysheetPreview
-                      excelBlob={new Blob([reportBuffers[selectedTableIdx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })}
-                    />
+                  {generatedReportBlob && (
+                    <LuckysheetPreview excelBlob={generatedReportBlob} />
                   )}
                 </div>
               </div>
