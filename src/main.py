@@ -260,12 +260,10 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
 
         ws.cell(row=row_num, column=14, value=row.get('carton', ''))      # N: Carton
         ws.cell(row=row_num, column=15, value=row.get('totalUnit', ''))   # O: Total Unit
-        # P: TOTAL N.W. (rounded to nearest 10)
-        total_nw = safe_float(row.get('totalNw', 0))
-        ws.cell(row=row_num, column=16, value=round(total_nw, -1) if total_nw else 0)
-        # Q: TOTAL G.W. (rounded to nearest 10)
-        total_gw = safe_float(row.get('totalGw', 0))
-        ws.cell(row=row_num, column=17, value=round(total_gw, -1) if total_gw else 0)
+        # P: TOTAL N.W. (match source data exactly)
+        ws.cell(row=row_num, column=16, value=row.get('totalNw', ''))
+        # Q: TOTAL G.W. (match source data exactly)
+        ws.cell(row=row_num, column=17, value=row.get('totalGw', ''))
         ws.cell(row=row_num, column=18, value=row.get('Length', ''))    # R: Length
         ws.cell(row=row_num, column=19, value=row.get('Width', ''))     # S: Width
         ws.cell(row=row_num, column=20, value=row.get('Height', ''))    # T: Height
@@ -273,6 +271,22 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
         cbm_value = safe_float(row.get('cbm', row.get('totalCbm', 0)))
         ws.cell(row=row_num, column=21, value=cbm_value)  # U: CBM
         ws.cell(row=row_num, column=22, value=cbm_value)  # V: TOTAL CBM
+
+    # After writing the main table, round Columns P (16), Q (17), U (21), and V (22) to 3 decimal places for each data row
+    for i in range(num_data_rows):
+        row_num = main_table_start + i
+        # P: Net Weight (rounded to 3 decimal places)
+        net_weight = safe_float(ws.cell(row=row_num, column=16).value)
+        ws.cell(row=row_num, column=16, value=round(net_weight, 3) if net_weight else 0)
+        # Q: Gross Weight (rounded to 3 decimal places)
+        gross_weight = safe_float(ws.cell(row=row_num, column=17).value)
+        ws.cell(row=row_num, column=17, value=round(gross_weight, 3) if gross_weight else 0)
+        # U: CBM (rounded to 3 decimal places)
+        cbm_value = safe_float(ws.cell(row=row_num, column=21).value)
+        ws.cell(row=row_num, column=21, value=round(cbm_value, 3) if cbm_value else 0)
+        # V: TOTAL CBM (rounded to 3 decimal places)
+        total_cbm_value = safe_float(ws.cell(row=row_num, column=22).value)
+        ws.cell(row=row_num, column=22, value=round(total_cbm_value, 3) if total_cbm_value else 0)
 
     # Always write summary and color breakdown at fixed positions after the main table
     size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
@@ -284,11 +298,11 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
     color_breakdown_col = 6  # F
 
 
-    # --- Only merge Carton# and columns O–V (15–22), but NOT N (14)
+    # --- Only merge Carton# and columns N–V (14–22) for split cartons
     for carton_no, rng in carton_row_ranges.items():
         if carton_no and carton_no.lower() != 'nan' and rng['end'] > rng['start']:
             ws.merge_cells(start_row=rng['start'], start_column=3, end_row=rng['end'], end_column=3)
-            for col in range(15, 23):  # O–V (skip N=14)
+            for col in range(14, 23):  # N–V (now includes N=14)
                 ws.merge_cells(start_row=rng['start'], start_column=col, end_row=rng['end'], end_column=col)
 
     # --- SUMMARY AND COLOR BREAKDOWN (replicate frontend logic) ---
@@ -359,6 +373,14 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
             last_units_crt = units_crt_val
         total_carton += safe_float(last_units_crt)
     
+    # --- FIX: Total Carton should be the count of unique, non-empty, non-'nan' carton numbers from the original data ---
+    carton_numbers_set = set()
+    for row in rows:
+        carton_no = str(row.get('caseNos', '')).strip().lower()
+        if carton_no and carton_no != 'nan':
+            carton_numbers_set.add(carton_no)
+    total_carton = len(carton_numbers_set)
+
     # --- SUMMARY TABLE CALCULATION AND WRITING ---
     main_table_end_row = main_table_start + len(rows) - 1
     # Check if there are any empty cells in column N (14)
@@ -391,7 +413,7 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
 
     # Write summary values (labels and values) below the summary header
     ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
-    ws.cell(row=summary_start_row+1, column=value_col, value=round(total_carton, 3))
+    ws.cell(row=summary_start_row+1, column=value_col, value=int(total_carton))
     ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight')
     ws.cell(row=summary_start_row+2, column=value_col, value=round(total_net_weight, 3))
     ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight')
@@ -428,31 +450,21 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
             continue
         carton_count_map[carton_no] = carton_count_map.get(carton_no, 0) + 1
 
-    # --- FIXED COLOR BREAKDOWN LOGIC ---
+    # --- NEW LOGIC: Color breakdown using worksheet values, propagating Units/CRT (N) down ---
     color_map = {}
     size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
     size_col_indices = [7, 8, 9, 10, 11, 12, 13]  # G=7, H=8, ..., M=13 (1-based)
     color_col = 4  # D=4 (1-based)
     units_crt_col = 14  # N=14 (1-based)
-
-    # Propagate Units/CRT down for merged cells (if 0 or empty, copy from above)
     last_units_crt = None
     for i in range(num_data_rows):
         row_num = main_table_start + i
-        cell = ws.cell(row=row_num, column=14)
-        val = cell.value
-        if val is not None and str(val).strip() not in ['', 'nan', 'None', '0']:
-            last_units_crt = val
-        else:
-            if not isinstance(cell, MergedCell):
-                cell.value = last_units_crt
-
-    for i in range(num_data_rows):
-        row_num = main_table_start + i
         color = ws.cell(row=row_num, column=color_col).value
-        units_crt = safe_float(ws.cell(row=row_num, column=units_crt_col).value)
-        size_vals = [ws.cell(row=row_num, column=col).value for col in size_col_indices]
-        print(f"Row {i}: color={color}, units_crt={units_crt}, sizes={size_vals}")
+        units_crt = ws.cell(row=row_num, column=units_crt_col).value
+        if units_crt not in [None, '', 'nan', 'None', 0, '0']:
+            last_units_crt = safe_float(units_crt)
+        # If units_crt is empty, use the last non-empty value
+        effective_units_crt = last_units_crt if last_units_crt is not None else 0
         if not color or str(color).strip().lower() in ['nan', 'none', '']:
             continue
         color = str(color).strip()
@@ -460,7 +472,7 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
             color_map[color] = [0] * len(size_names)
         for j, size_col in enumerate(size_col_indices):
             size_val = safe_float(ws.cell(row=row_num, column=size_col).value)
-            color_map[color][j] += size_val * units_crt
+            color_map[color][j] += size_val * effective_units_crt
 
     valid_colors = [color for color in color_map.keys() if color and color.lower() not in ['nan', 'none']]
 

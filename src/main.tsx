@@ -1,9 +1,9 @@
-if (process.env.NODE_ENV === 'development') {
+//if (process.env.NODE_ENV === 'development') {
   // @ts-ignore
-  import('./mocks/browser').then(({ worker }) => {
-  worker.start();
-  });
-}
+  //import('./mocks/browser').then(({ worker }) => {
+  //worker.start();
+  //});
+//}
 
 import React from 'react'
 import ReactDOM from 'react-dom/client'
