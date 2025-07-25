@@ -26,7 +26,7 @@ function App() {
   // Add state for merged cell preview
   const [mergedCellText, setMergedCellText] = useState<string>('');
   // 1. Add state variable for backend-generated Blob
-  const [generatedReportBlob, setGeneratedReportBlob] = useState<Blob | null>(null);
+  // const [generatedReportBlob, setGeneratedReportBlob] = useState<Blob | null>(null);
 
   const handleFileUpload = (file: File) => {
     setUploadedFile(file);
@@ -241,7 +241,7 @@ function App() {
         Object.values(cartonRowRanges).forEach(({start, end}) => {
           if (end > start) {
             ws.mergeCells(`C${start}:C${end}`);
-            // Also merge columns N–V for this group
+            // Also merge columns N–V for this group (Column N is 14, O=15, ..., V=22)
             const colLetters = ['N','O','P','Q','R','S','T','U','V'];
             colLetters.forEach(col => {
               ws.mergeCells(`${col}${start}:${col}${end}`);
@@ -249,26 +249,44 @@ function App() {
           }
         });
 
-        
+        // --- ROUNDING LOGIC FOR P, Q, U, V (16, 17, 21, 22) ---
+        const roundingCols = [16, 17, 21, 22];
+        for (let i = 0; i < numDataRows; i++) {
+          const rowNum = mainTableStart + i;
+          roundingCols.forEach(colIdx => {
+            const cell = ws.getRow(rowNum).getCell(colIdx);
+            if (typeof cell.value === 'number' && !isNaN(cell.value)) {
+              cell.value = Math.round(cell.value * 1000) / 1000;
+            }
+          });
+        }
+
+        // --- TOTAL CARTON LOGIC: sum only the first non-empty cell of each merged group in Column N ---
+        let totalCarton = 0;
+        let prevCartonVal = null;
+        for (let i = 0; i < numDataRows; i++) {
+          const rowNum = mainTableStart + i;
+          const cartonVal = ws.getRow(rowNum).getCell(14).value;
+          if (
+            cartonVal &&
+            cartonVal !== '' &&
+            cartonVal !== 'nan' &&
+            cartonVal !== 'none' &&
+            cartonVal !== prevCartonVal
+          ) {
+            totalCarton += Number(cartonVal);
+            prevCartonVal = cartonVal;
+          }
+        }
+        totalCarton = Math.floor(totalCarton);
 
         // --- SUMMARY AND COLOR BREAKDOWN ---
         // Move summary and color breakdown to start 1 row below the last data row
         const summaryStartRow = mainTableStart + numDataRows + 1;
-        // Merge D and E for the summary name
         ws.mergeCells(`D${summaryStartRow}:E${summaryStartRow}`);
         ws.getCell(`D${summaryStartRow}`).value = 'Summary';
         ws.getCell(`D${summaryStartRow}`).alignment = { horizontal: 'center', vertical: 'middle' };
 
-        // Get the last Carton# entry and process it
-        const lastCartonEntry = dataRows.length > 0 ? safe(dataRows[dataRows.length - 1], idxCaseNos) : '';
-        let processedCartonValue = lastCartonEntry;
-        if (lastCartonEntry && lastCartonEntry.includes('-')) {
-          const parts = lastCartonEntry.split('-');
-          processedCartonValue = parts[parts.length - 1].trim();
-        }
-        console.log(`Last Carton# entry: "${lastCartonEntry}" -> Processed value: "${processedCartonValue}"`);
-
-        // Write summary titles in D, values in E
         // Calculate summary values from the report columns
         let totalNetWeight = 0;
         let totalGrossWeight = 0;
@@ -279,41 +297,35 @@ function App() {
           totalGrossWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
           totalCBM += parseFloat(ws.getCell(`V${rowNum}`).value as string) || 0;
         }
-        const summaryData = [
-          { title: 'Total Carton', value: processedCartonValue },
-          { title: 'Total Net Weight', value: totalNetWeight },
-          { title: 'Total Gross Weight', value: totalGrossWeight },
-          { title: 'Total CBM', value: parseFloat(totalCBM.toFixed(3)) }
-        ];
-        summaryData.forEach((item, i) => {
-          ws.getCell(`D${summaryStartRow + 1 + i}`).value = item.title;
-          ws.getCell(`E${summaryStartRow + 1 + i}`).value = item.value;
-        });
+        // Write summary titles in D, values in E
+        ws.getCell(`D${summaryStartRow + 1}`).value = 'Total Carton';
+        ws.getCell(`E${summaryStartRow + 1}`).value = totalCarton;
+        ws.getCell(`D${summaryStartRow + 2}`).value = 'Total Net Weight';
+        ws.getCell(`E${summaryStartRow + 2}`).value = Math.round(totalNetWeight * 1000) / 1000;
+        ws.getCell(`D${summaryStartRow + 3}`).value = 'Total Gross Weight';
+        ws.getCell(`E${summaryStartRow + 3}`).value = Math.round(totalGrossWeight * 1000) / 1000;
+        ws.getCell(`D${summaryStartRow + 4}`).value = 'Total CBM';
+        ws.getCell(`E${summaryStartRow + 4}`).value = Math.round(totalCBM * 1000) / 1000;
 
-        // --- COLOR BREAKDOWN FROM GENERATED WORKSHEET ---
-        // Columns H:N are OS, XS, S, M, L, XL, XXL (col 8-14, 1-based)
-        const colorMap: Record<string, number[]> = {};
-        // Map each size to its worksheet column letter (adjusted for your template)
-        const sizeColLetters = ['G', 'H', 'I', 'J', 'K', 'L', 'M']; // OS, XS, S, M, L, XL, XXL
+        // --- COLOR BREAKDOWN: multiply size values by propagated Units/CRT from Column N ---
+        const sizeColIndices = [7, 8, 9, 10, 11, 12, 13]; // G–M
+        const colorColIdx = 4; // D
+        const unitsCrtColIdx = 14; // N
+        let colorMap: Record<string, number[]> = {};
+        let lastUnitsCrt: number | null = null;
         for (let i = 0; i < numDataRows; i++) {
           const rowNum = mainTableStart + i;
-          const color = ws.getCell(`D${rowNum}`).value?.toString().trim() || '';
+          const color = ws.getRow(rowNum).getCell(colorColIdx).value?.toString().trim();
+          let unitsCrt = ws.getRow(rowNum).getCell(unitsCrtColIdx).value;
+          if (unitsCrt && unitsCrt !== '' && unitsCrt !== 'nan' && unitsCrt !== 'none') {
+            lastUnitsCrt = Number(unitsCrt);
+          }
           if (!color) continue;
-          if (!colorMap[color]) colorMap[color] = [0,0,0,0,0,0,0];
-          const cartonNo = effectiveCartonNos[i];
-          // OS column (index 0): use split carton logic
-          if (cartonNo && cartonCountMap[cartonNo] > 1) {
-            // Split carton: use OS (G)
-            colorMap[color][0] += parseFloat(ws.getCell(`G${rowNum}`).value as string) || 0;
-          } else {
-            // Single carton: use Total Unit (O)
-            colorMap[color][0] += parseFloat(ws.getCell(`O${rowNum}`).value as string) || 0;
-          }
-          // Other sizes: use previous logic (from worksheet columns)
-          for (let j = 1; j < 7; j++) {
-            const cellVal = parseFloat(ws.getCell(`${sizeColLetters[j]}${rowNum}`).value as string) || 0;
-            colorMap[color][j] += cellVal;
-          }
+          if (!colorMap[color]) colorMap[color] = Array(sizeNames.length).fill(0);
+          sizeColIndices.forEach((colIdx, j) => {
+            const sizeVal = Number(ws.getRow(rowNum).getCell(colIdx).value) || 0;
+            colorMap[color][j] += sizeVal * (lastUnitsCrt ?? 0);
+          });
         }
         // --- DYNAMIC COLOR BREAKDOWN TABLE ---
         // Place color breakdown headers adjacent to the Total Carton row in the summary
@@ -467,7 +479,7 @@ function App() {
       if (!response.ok) throw new Error('Failed to generate combined report');
 
       const blob = await response.blob();
-      setGeneratedReportBlob(blob); // <-- Store backend-generated Blob
+      // setGeneratedReportBlob(blob); // <-- Store backend-generated Blob
       // Use uploaded file name + 'Report.xlsx' for the download
       const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
       saveAs(blob, `${baseName}Report.xlsx`);
@@ -488,7 +500,7 @@ function App() {
     setParsedTables([]);
     setSelectedTableIdx(0);
     setMergedCellText('');
-    setGeneratedReportBlob(null); // <-- Reset backend-generated Blob
+    // setGeneratedReportBlob(null); // <-- Reset backend-generated Blob
   };
 
   return (
@@ -587,8 +599,10 @@ function App() {
                       <span style={{ flex: 1, fontWeight: 500 }}>{mergedCellText}</span>
                     </div>
                   )}
-                  {generatedReportBlob && (
-                    <LuckysheetPreview excelBlob={generatedReportBlob} />
+                  {reportBuffers[selectedTableIdx] && (
+                    <LuckysheetPreview
+                      excelBlob={new Blob([reportBuffers[selectedTableIdx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })}
+                    />
                   )}
                 </div>
               </div>
