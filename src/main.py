@@ -372,29 +372,28 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
         if units_crt_val not in [None, '', 'nan', 'None', 0, '0']:
             last_units_crt = units_crt_val
         total_carton += safe_float(last_units_crt)
-    
-    # --- FIX: Total Carton should be the count of unique, non-empty, non-'nan' carton numbers from the original data ---
-    carton_numbers_set = set()
-    for row in rows:
-        carton_no = str(row.get('caseNos', '')).strip().lower()
-        if carton_no and carton_no != 'nan':
-            carton_numbers_set.add(carton_no)
-    total_carton = len(carton_numbers_set)
+
+    # --- FINAL: Total Carton sums only the first non-empty cell of each merged group in Column N ---
+    total_carton = 0
+    prev_units_crt_val = None
+    print('DEBUG: Total Carton Calculation - values counted:')
+    for i in range(num_data_rows):
+        row_num = main_table_start + i
+        units_crt_val = ws.cell(row=row_num, column=14).value
+        # Only count if non-empty and different from previous (or first row)
+        if units_crt_val not in [None, '', 'nan', 'none', 0, '0'] and units_crt_val != prev_units_crt_val:
+            try:
+                val = float(units_crt_val)
+                total_carton += val
+                print(f'  Row {row_num}: Counted {val}, running total: {total_carton}')
+            except (ValueError, TypeError):
+                print(f'  Row {row_num}: Skipped (invalid value: {units_crt_val})')
+        prev_units_crt_val = units_crt_val
+    print(f'DEBUG: Final Total Carton: {int(total_carton)}')
+    total_carton = int(total_carton)
 
     # --- SUMMARY TABLE CALCULATION AND WRITING ---
     main_table_end_row = main_table_start + len(rows) - 1
-    # Check if there are any empty cells in column N (14)
-    any_empty = any(ws.cell(row=row, column=14).value in [None, '', 'nan', 'None', 0, '0'] for row in range(main_table_start, main_table_end_row + 1))
-    # Use copy-down sum if there are empty cells, else use direct sum
-    if any_empty:
-        total_carton, _ = copy_down_sum(ws, main_table_start, main_table_end_row, 14)
-        print('DEBUG: Used copy-down sum for total_carton')
-    else:
-        total_carton = sum(
-            int(ws.cell(row=row, column=14).value) if str(ws.cell(row=row, column=14).value).isdigit() else 0
-            for row in range(main_table_start, main_table_end_row + 1)
-        )
-        print('DEBUG: Used direct sum for total_carton')
     # Sum of Net Weight (Column P = 16)
     total_net_weight = sum(
         safe_float(ws.cell(row=row, column=16).value)
