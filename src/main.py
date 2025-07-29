@@ -278,19 +278,23 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
         # P: Net Weight (formatted to show at least 3 decimal places)
         net_weight = safe_float(ws.cell(row=row_num, column=16).value)
         formatted_net_weight = f"{net_weight:.3f}" if net_weight else "0.000"
-        ws.cell(row=row_num, column=16, value=float(formatted_net_weight))
+        cell = ws.cell(row=row_num, column=16, value=float(formatted_net_weight))
+        cell.number_format = "0.000"
         # Q: Gross Weight (formatted to show at least 3 decimal places)
         gross_weight = safe_float(ws.cell(row=row_num, column=17).value)
         formatted_gross_weight = f"{gross_weight:.3f}" if gross_weight else "0.000"
-        ws.cell(row=row_num, column=17, value=float(formatted_gross_weight))
+        cell = ws.cell(row=row_num, column=17, value=float(formatted_gross_weight))
+        cell.number_format = "0.000"
         # U: CBM (formatted to show at least 3 decimal places)
         cbm_value = safe_float(ws.cell(row=row_num, column=21).value)
         formatted_cbm = f"{cbm_value:.3f}" if cbm_value else "0.000"
-        ws.cell(row=row_num, column=21, value=float(formatted_cbm))
+        cell = ws.cell(row=row_num, column=21, value=float(formatted_cbm))
+        cell.number_format = "0.000"
         # V: TOTAL CBM (formatted to show at least 3 decimal places)
         total_cbm_value = safe_float(ws.cell(row=row_num, column=22).value)
         formatted_total_cbm = f"{total_cbm_value:.3f}" if total_cbm_value else "0.000"
-        ws.cell(row=row_num, column=22, value=float(formatted_total_cbm))
+        cell = ws.cell(row=row_num, column=22, value=float(formatted_total_cbm))
+        cell.number_format = "0.000"
 
     # Always write summary and color breakdown at fixed positions after the main table
     size_names = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
@@ -419,13 +423,16 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
     ws.cell(row=summary_start_row+1, column=value_col, value=int(total_carton))
     ws.cell(row=summary_start_row+2, column=summary_col, value='Total Net Weight')
     formatted_total_net_weight = f"{total_net_weight:.3f}" if total_net_weight else "0.000"
-    ws.cell(row=summary_start_row+2, column=value_col, value=float(formatted_total_net_weight))
+    cell = ws.cell(row=summary_start_row+2, column=value_col, value=float(formatted_total_net_weight))
+    cell.number_format = "0.000"
     ws.cell(row=summary_start_row+3, column=summary_col, value='Total Gross Weight')
     formatted_total_gross_weight = f"{total_gross_weight:.3f}" if total_gross_weight else "0.000"
-    ws.cell(row=summary_start_row+3, column=value_col, value=float(formatted_total_gross_weight))
+    cell = ws.cell(row=summary_start_row+3, column=value_col, value=float(formatted_total_gross_weight))
+    cell.number_format = "0.000"
     ws.cell(row=summary_start_row+4, column=summary_col, value='Total CBM')
     formatted_total_cbm = f"{total_cbm:.3f}" if total_cbm else "0.000"
-    ws.cell(row=summary_start_row+4, column=value_col, value=float(formatted_total_cbm))
+    cell = ws.cell(row=summary_start_row+4, column=value_col, value=float(formatted_total_cbm))
+    cell.number_format = "0.000"
 
     # --- COLOR BREAKDOWN SECTION (replicating frontend split-carton logic) ---
     # Place color breakdown headers to align with the summary header row
