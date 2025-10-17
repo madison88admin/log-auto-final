@@ -468,12 +468,18 @@ function App() {
 
       const API_URL = import.meta.env.VITE_API_URL || 'https://log-auto-final-python.onrender.com';
       console.log('API_URL:', API_URL);
+      
       const response = await fetch(`${API_URL}/generate-reports/`, {
         method: 'POST',
         body: formData,
       });
 
-      if (!response.ok) throw new Error('Failed to generate combined report');
+      if (!response.ok) {
+        if (response.status === 0) {
+          throw new Error('Network error: Unable to connect to the server. This may be a CORS issue or the server is down.');
+        }
+        throw new Error(`Server error: ${response.status} ${response.statusText}`);
+      }
 
       const blob = await response.blob();
       
@@ -481,7 +487,12 @@ function App() {
       const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
       saveAs(blob, `${baseName}Report.xlsx`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred while exporting the combined report');
+      console.error('Export error:', err);
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        setError('Network error: Unable to connect to the server. Please check if the backend is running and accessible.');
+      } else {
+        setError(err instanceof Error ? err.message : 'An error occurred while exporting the combined report');
+      }
     } finally {
       setIsProcessing(false);
     }
