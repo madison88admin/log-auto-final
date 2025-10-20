@@ -204,8 +204,10 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
     effective_carton_nos = []
     last_carton_no = ''
     carton_row_ranges = {}
+    print(f"[DEBUG] Processing {len(rows)} rows for carton numbers")
     for i, row in enumerate(rows):
         carton_no = str(row.get('caseNos', '')).strip()
+        print(f"[DEBUG] Row {i}: caseNos = '{carton_no}'")
         # Only propagate and track valid carton numbers (not empty, not 'nan')
         if carton_no and carton_no.lower() != 'nan':
             last_carton_no = carton_no
@@ -216,6 +218,9 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
                 carton_row_ranges[last_carton_no] = {'start': row_num, 'end': row_num}
             else:
                 carton_row_ranges[last_carton_no]['end'] = row_num
+    
+    print(f"[DEBUG] Effective carton numbers: {effective_carton_nos}")
+    print(f"[DEBUG] Carton row ranges: {carton_row_ranges}")
 
     # --- Write main table with split-carton OS logic and inline copy-down for D/E/F ---
     prev_color = ''

@@ -72,10 +72,14 @@ function App() {
 
         // Column indices
         const idxColor = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('COLOR'));
-        const idxCaseNos = headerRow.indexOf('CASE NOS');
-        const idxS4Material = headerRow.indexOf('S4 Material');
-        const idxECCMaterial = headerRow.indexOf('Material No#');
+        const idxCaseNos = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('CASENOS'));
+        const idxS4Material = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('S4MATERIAL'));
+        const idxECCMaterial = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('MATERIALNO'));
         const sizeNames = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL'];
+
+        // Debug: log column indices
+        console.log('Column indices:', { idxColor, idxCaseNos, idxS4Material, idxECCMaterial });
+        console.log('Header row:', headerRow);
 
         // Helper to safely get a value
         const safe = (row: any[], idx: number) => (idx >= 0 && row && row[idx] !== undefined ? row[idx] : '');
@@ -119,6 +123,10 @@ function App() {
           }
           return lastCartonNo;
         });
+
+        // Debug: log carton numbers
+        console.log('Effective carton numbers:', effectiveCartonNos);
+        console.log('idxCaseNos:', idxCaseNos);
 
         // 2. Build cartonCountMap using propagated carton numbers
         const cartonCountMap: Record<string, number> = {};
