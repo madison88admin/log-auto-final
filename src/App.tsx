@@ -9,6 +9,7 @@ import { Header } from './components/Header';
 import { ProcessingResult } from './types';
 import ExcelJS from 'exceljs';
 import LuckysheetPreview from './components/LuckysheetPreview';
+import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
 function App() {
@@ -35,9 +36,6 @@ function App() {
     setParsedTables([]);
     setSelectedTableIdx(0);
     setMergedCellText('');
-    // Reset report buffers when uploading a new file
-    setReportBuffers([]);
-    setReportSheetNames([]);
   };
 
   // Helper to generate all report buffers and sheet names
@@ -72,14 +70,10 @@ function App() {
 
         // Column indices
         const idxColor = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('COLOR'));
-        const idxCaseNos = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('CASENOS'));
-        const idxS4Material = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('S4MATERIAL'));
-        const idxECCMaterial = headerRow.findIndex(h => h && h.toString().replace(/\s+/g, '').toUpperCase().includes('MATERIALNO'));
+        const idxCaseNos = headerRow.indexOf('CASE NOS');
+        const idxS4Material = headerRow.indexOf('S4 Material');
+        const idxECCMaterial = headerRow.indexOf('Material No#');
         const sizeNames = ['OS', 'XS', 'S', 'M', 'L', 'XL', 'XXL'];
-
-        // Debug: log column indices
-        console.log('Column indices:', { idxColor, idxCaseNos, idxS4Material, idxECCMaterial });
-        console.log('Header row:', headerRow);
 
         // Helper to safely get a value
         const safe = (row: any[], idx: number) => (idx >= 0 && row && row[idx] !== undefined ? row[idx] : '');
@@ -123,10 +117,6 @@ function App() {
           }
           return lastCartonNo;
         });
-
-        // Debug: log carton numbers
-        console.log('Effective carton numbers:', effectiveCartonNos);
-        console.log('idxCaseNos:', idxCaseNos);
 
         // 2. Build cartonCountMap using propagated carton numbers
         const cartonCountMap: Record<string, number> = {};
@@ -247,12 +237,15 @@ function App() {
           ws.getCell(`V${rowNum}`).value = safe(row, 20); // V = U
         });
 
-        // 5. Merge Carton# cells for each group in the worksheet.
-        // Do NOT merge numeric columns (N–V), because rows in a split-carton group
-        // have different values for Total Unit, weights, and CBM.
+        // 5. Merge Carton# cells for each group in the worksheet
         Object.values(cartonRowRanges).forEach(({start, end}) => {
           if (end > start) {
             ws.mergeCells(`C${start}:C${end}`);
+            // Also merge columns N–V for this group (Column N is 14, O=15, ..., V=22)
+            const colLetters = ['N','O','P','Q','R','S','T','U','V'];
+            colLetters.forEach(col => {
+              ws.mergeCells(`${col}${start}:${col}${end}`);
+            });
           }
         });
 
@@ -311,21 +304,25 @@ function App() {
         ws.getCell(`D${summaryStartRow + 4}`).value = 'Total CBM';
         ws.getCell(`E${summaryStartRow + 4}`).value = Math.round(totalCBM * 1000) / 1000;
 
-        // --- COLOR BREAKDOWN (accurate): sum 'Total Unit' per color ---
-        // We only care about OS totals for each color for the breakdown table.
-        // The source table's 'TOTAL QTY' already reflects Units/CRT * Carton for that row,
-        // so we should NOT multiply size cells by Units/CRT again (that inflated values previously).
+        // --- COLOR BREAKDOWN: multiply size values by propagated Units/CRT from Column N ---
+        const sizeColIndices = [7, 8, 9, 10, 11, 12, 13]; // G–M
         const colorColIdx = 4; // D
-        const totalUnitColIdx = 15; // Column O in the report (1-based index)
+        const unitsCrtColIdx = 14; // N
         let colorMap: Record<string, number[]> = {};
+        let lastUnitsCrt: number | null = null;
         for (let i = 0; i < numDataRows; i++) {
           const rowNum = mainTableStart + i;
           const color = ws.getRow(rowNum).getCell(colorColIdx).value?.toString().trim();
+          let unitsCrt = ws.getRow(rowNum).getCell(unitsCrtColIdx).value;
+          if (unitsCrt && unitsCrt !== '' && unitsCrt !== 'nan' && unitsCrt !== 'none') {
+            lastUnitsCrt = Number(unitsCrt);
+          }
           if (!color) continue;
           if (!colorMap[color]) colorMap[color] = Array(sizeNames.length).fill(0);
-          const totalUnits = Number(ws.getRow(rowNum).getCell(totalUnitColIdx).value) || 0;
-          // Accumulate to OS bucket; other sizes remain zero as per data
-          colorMap[color][0] += totalUnits;
+          sizeColIndices.forEach((colIdx, j) => {
+            const sizeVal = Number(ws.getRow(rowNum).getCell(colIdx).value) || 0;
+            colorMap[color][j] += sizeVal * (lastUnitsCrt ?? 0);
+          });
         }
         // --- DYNAMIC COLOR BREAKDOWN TABLE ---
         // Place color breakdown headers adjacent to the Total Carton row in the summary
@@ -460,73 +457,30 @@ function App() {
     saveAs(new Blob([reportBuffers[idx]], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), fileName);
   };
 
-  // 2. In handleExportAllAsSingleExcel, create combined report locally
+  // 2. In handleExportAllAsSingleExcel, set the Blob
   const handleExportAllAsSingleExcel = async () => {
     if (!uploadedFile) return;
     setIsProcessing(true);
     setError(null);
     try {
-      // Always ensure we have the correct parsed data for the current file
-      let buffers = reportBuffers;
-      let sheetNames = reportSheetNames;
-      
-      // If no reports are generated yet, we need to parse the current file first
-      if (!buffers.length || !parsedTables.length) {
-        console.log('No reports or parsed tables found, need to parse the current file first...');
-        setError('Please click "Generate Reports" first to process the uploaded file, then use "Export All". This ensures the correct data from your current file is used.');
-        return;
-      }
-      // Create a combined workbook with all reports
-      const combinedWb = new ExcelJS.Workbook();
-      
-      // Add each report as a separate sheet
-      for (let i = 0; i < buffers.length; i++) {
-        const buffer = buffers[i];
-        const sheetName = sheetNames[i];
-        
-        // Load the individual report
-        const individualWb = new ExcelJS.Workbook();
-        await individualWb.xlsx.load(buffer);
-        
-        // Copy the worksheet to the combined workbook
-        const worksheet = individualWb.getWorksheet('Report');
-        if (worksheet) {
-          const newWorksheet = combinedWb.addWorksheet(sheetName);
-          // Copy all data from the original worksheet
-          worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-            const newRow = newWorksheet.getRow(rowNumber);
-            row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-              const newCell = newRow.getCell(colNumber);
-              newCell.value = cell.value;
-              newCell.style = cell.style;
-              if (cell.numFmt) newCell.numFmt = cell.numFmt;
-              if (cell.alignment) newCell.alignment = cell.alignment;
-              if (cell.border) newCell.border = cell.border;
-              if (cell.fill) newCell.fill = cell.fill;
-            });
-          });
-          
-          // Copy column widths
-          for (let col = 1; col <= worksheet.columnCount; col++) {
-            const originalCol = worksheet.getColumn(col);
-            if (originalCol.width) {
-              newWorksheet.getColumn(col).width = originalCol.width;
-            }
-          }
-        }
-      }
-      
-      // Generate the combined Excel file
-      const buffer = await combinedWb.xlsx.writeBuffer();
-      const blob = new Blob([buffer], { 
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      const formData = new FormData();
+      formData.append('file', uploadedFile);
+
+      const API_URL = import.meta.env.VITE_API_URL || 'https://log-auto-final-python.onrender.com';
+      console.log('API_URL:', API_URL);
+      const response = await fetch(`${API_URL}/generate-reports/`, {
+        method: 'POST',
+        body: formData,
       });
+
+      if (!response.ok) throw new Error('Failed to generate combined report');
+
+      const blob = await response.blob();
       
-      // Use uploaded file name + 'AllReports.xlsx' for the download
+      // Use uploaded file name + 'Report.xlsx' for the download
       const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
-      saveAs(blob, `${baseName}AllReports.xlsx`);
+      saveAs(blob, `${baseName}Report.xlsx`);
     } catch (err) {
-      console.error('Export error:', err);
       setError(err instanceof Error ? err.message : 'An error occurred while exporting the combined report');
     } finally {
       setIsProcessing(false);
@@ -603,11 +557,11 @@ function App() {
                   <ExcelHandsontablePreview
                     excelFile={uploadedFile}
                     title="PK Table"
-                    onTablesExtracted={(tables: { table: any[][], modelName: string, mergedCellText?: string }[]) => {
+                    onTablesExtracted={tables => {
                       setParsedTables(tables);
                       setMergedCellText(tables[0]?.mergedCellText || '');
                     }}
-                    onSelectedTableChange={(_table: any[][], _modelName: string) => {
+                    onSelectedTableChange={(_table, _modelName) => {
                       // Find the index of the selected table
                       const idx = parsedTables.findIndex(t => t.table === _table && t.modelName === _modelName);
                       if (idx >= 0) setSelectedTableIdx(idx);
