@@ -212,7 +212,7 @@ export class ExcelReportGenerator {
       // Total Unit (TOTAL QTY) - Col 6 (G)
       const totalQty = row['totalQty'] ?? row['totalQty2'];
       const weightPerCarton = row['totalNw']; // Column N (13)
-      
+
       // Calculate column G (O divided by N) - Col 6 (G)
       let gValue: number | string = '';
       if (totalQty && weightPerCarton && weightPerCarton !== 0) {
@@ -223,18 +223,20 @@ export class ExcelReportGenerator {
         gValue = prevCell ? prevCell.v : '';
       }
       ws[XLSX.utils.encode_cell({ r: startRow + i, c: 6 })] = { v: gValue, t: typeof gValue === 'number' ? 'n' : 's' };
-      
+
       // Debug log for column G calculation
       console.log(`Row ${startRow + i + 1}, Column G: ${gValue} (O=${totalQty}, N=${weightPerCarton})`);
-      
-      // Net Weight (TOTAL N.W.) - Col 7
-      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 7 })] = { v: row['totalNw'], t: 'n' };
-      // Gross Weight (TOTAL G.W.) - Col 8
-      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 8 })] = { v: row['totalGw'], t: 'n' };
-      // Carton Size (MEAS. CM) - Col 9
-      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 9 })] = { v: row['measCm'], t: 's' };
-      // Total CBM (TOTAL CBM) - Col 10
-      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 10 })] = { v: row['totalCbm'], t: 'n' };
+
+      // Net Net Weight (TOTAL N.N.W.) - Col 7
+      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 7 })] = { v: row['totalNnw'], t: 'n' };
+      // Net Weight (TOTAL N.W.) - Col 8
+      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 8 })] = { v: row['totalNw'], t: 'n' };
+      // Gross Weight (TOTAL G.W.) - Col 9
+      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 9 })] = { v: row['totalGw'], t: 'n' };
+      // Carton Size (MEAS. CM) - Col 10
+      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 10 })] = { v: row['measCm'], t: 's' };
+      // Total CBM (TOTAL CBM) - Col 11
+      ws[XLSX.utils.encode_cell({ r: startRow + i, c: 11 })] = { v: row['totalCbm'], t: 'n' };
     });
 
     // 2. Lower summary box (assume starts at row 22, columns: Colour, OS, ...)
@@ -255,6 +257,8 @@ export class ExcelReportGenerator {
     // 3. Summary section (assume fixed cells)
     // Total Carton: count of unique cartons
     const totalCarton = new Set(orderData.map(row => row['caseNos'])).size;
+    // Total Net Net Weight (kg): sum of TOTAL N.N.W.
+    const totalNetNetWeight = orderData.reduce((sum, row) => sum + (Number(row['totalNnw']) || 0), 0);
     // Total Net Weight (kg): sum of TOTAL N.W.
     const totalNetWeight = orderData.reduce((sum, row) => sum + (Number(row['totalNw']) || 0), 0);
     // Total Gross Weight (kg): sum of TOTAL G.W.
@@ -263,8 +267,9 @@ export class ExcelReportGenerator {
     const totalCbm = orderData.reduce((sum, row) => sum + (Number(row['totalCbm']) || 0), 0);
     // Write to assumed summary cells (adjust as needed)
     ws[XLSX.utils.encode_cell({ r: 30, c: 1 })] = { v: totalCarton, t: 'n' }; // Total Carton
-    ws[XLSX.utils.encode_cell({ r: 31, c: 1 })] = { v: totalNetWeight, t: 'n' }; // Total Net Weight
-    ws[XLSX.utils.encode_cell({ r: 32, c: 1 })] = { v: totalGrossWeight, t: 'n' }; // Total Gross Weight
-    ws[XLSX.utils.encode_cell({ r: 33, c: 1 })] = { v: totalCbm, t: 'n' }; // Total CBM
+    ws[XLSX.utils.encode_cell({ r: 31, c: 1 })] = { v: totalNetNetWeight, t: 'n' }; // Total Net Net Weight
+    ws[XLSX.utils.encode_cell({ r: 32, c: 1 })] = { v: totalNetWeight, t: 'n' }; // Total Net Weight
+    ws[XLSX.utils.encode_cell({ r: 33, c: 1 })] = { v: totalGrossWeight, t: 'n' }; // Total Gross Weight
+    ws[XLSX.utils.encode_cell({ r: 34, c: 1 })] = { v: totalCbm, t: 'n' }; // Total CBM
   }
 }

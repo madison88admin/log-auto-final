@@ -31,67 +31,67 @@ export class PackingListProcessor {
       // Read the Excel file
       const arrayBuffer = await file.arrayBuffer();
       const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-      
+
       // Check if "PK (2)" sheet exists
       // Find the PK sheet with more flexible matching
       let targetSheet = null;
       let sheetName = '';
-      
+
       // Try exact match first
       if (workbook.SheetNames.includes('PK (2)')) {
         sheetName = 'PK (2)';
         targetSheet = workbook.Sheets[sheetName];
       } else {
         // Try to find a sheet that contains "PK" and "(2)"
-        const pkSheet = workbook.SheetNames.find(name => 
+        const pkSheet = workbook.SheetNames.find(name =>
           name.includes('PK') && name.includes('(2)')
         );
-        
+
         if (pkSheet) {
           sheetName = pkSheet;
           targetSheet = workbook.Sheets[pkSheet];
         } else {
           // Try to find any sheet that starts with "PK"
-          const pkSheetAlt = workbook.SheetNames.find(name => 
+          const pkSheetAlt = workbook.SheetNames.find(name =>
             name.trim().toLowerCase().startsWith('pk')
           );
-          
+
           if (pkSheetAlt) {
             sheetName = pkSheetAlt;
             targetSheet = workbook.Sheets[pkSheetAlt];
           }
         }
       }
-      
+
       if (!targetSheet) {
         throw new Error(`No suitable PK sheet found in the Excel file. Available sheets: ${workbook.SheetNames.join(', ')}. Please ensure there is a sheet named "PK (2)" or similar.`);
       }
-      
+
       const worksheet = targetSheet;
-      
+
       // Extract full TK List data
       const tkListData = this.extractTKListData(worksheet);
-      
+
       if (tkListData.rows.length === 0) {
         throw new Error('No data found in the PK (2) sheet after the header row');
       }
-      
+
       // Extract and validate data (keeping existing logic for backward compatibility)
       const { validData, validationLog } = this.extractAndValidateData(tkListData.rows);
-      
+
       if (validData.length === 0) {
         throw new Error('No valid data found after validation');
       }
-      
+
       // Group by order numbers and generate reports
       const orderReports = this.generateOrderReports(validData);
-      
+
       // Generate Excel report with full data for validation
       const excelBuffer = await this.reportGenerator.generateExcelReport(orderReports, tkListData, file.name);
-      
+
       // Perform strict validation
       const strictValidationResults = this.performStrictValidation(orderReports, tkListData);
-      
+
       return {
         success: true,
         orderReports,
@@ -101,12 +101,12 @@ export class PackingListProcessor {
         originalFileName: file.name,
         processedAt: new Date()
       };
-      
+
     } catch (error) {
       throw new Error(`Failed to process packing list: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
-  
+
   // Canonical mapping for your provided headers
   private static HEADER_MAPPING: Record<string, string> = {
     'CASE NOS': 'caseNos',
@@ -122,6 +122,8 @@ export class PackingListProcessor {
     'CARTON': 'carton',
     'QTY / CARTON': 'qtyPerCarton',
     'TOTAL QTY': 'totalQty2',
+    'N.N.W / ctn.': 'nnwPerCtn',
+    'TOTAL N.N.W.': 'totalNnw',
     'N.W / ctn.': 'nwPerCtn',
     'TOTAL N.W.': 'totalNw',
     'G.W. / ctn': 'gwPerCtn',
@@ -141,7 +143,7 @@ export class PackingListProcessor {
     let headerRowIdx = -1;
     let headerRow: string[] = [];
     let useExactMapping = false;
-    
+
     for (let i = 0; i < allRows.length; i++) {
       const row = (allRows[i] as (string | undefined)[]).map((cell: any) => (cell || '').toString().trim());
       // Normalize both row and mapping keys for comparison
@@ -158,36 +160,36 @@ export class PackingListProcessor {
       // Otherwise, use flexible detection as before
       const hasCarton = row.some(cell => {
         const cellLower = cell.toLowerCase();
-        return cellLower.includes('carton') || 
-               cellLower.includes('box') ||
-               cellLower.includes('ctn') ||
-               cellLower.includes('carton #') ||
-               cellLower.includes('carton#') ||
-               cellLower.includes('box #') ||
-               cellLower.includes('box#');
+        return cellLower.includes('carton') ||
+          cellLower.includes('box') ||
+          cellLower.includes('ctn') ||
+          cellLower.includes('carton #') ||
+          cellLower.includes('carton#') ||
+          cellLower.includes('box #') ||
+          cellLower.includes('box#');
       });
       const hasColor = row.some(cell => {
         const cellLower = cell.toLowerCase();
-        return cellLower.includes('color') || 
-               cellLower.includes('colour') ||
-               cellLower.includes('clr') ||
-               cellLower.includes('color #') ||
-               cellLower.includes('color#') ||
-               cellLower.includes('colour #') ||
-               cellLower.includes('colour#') ||
-               cellLower.includes('clr #') ||
-               cellLower.includes('clr#');
+        return cellLower.includes('color') ||
+          cellLower.includes('colour') ||
+          cellLower.includes('clr') ||
+          cellLower.includes('color #') ||
+          cellLower.includes('color#') ||
+          cellLower.includes('colour #') ||
+          cellLower.includes('colour#') ||
+          cellLower.includes('clr #') ||
+          cellLower.includes('clr#');
       });
       const hasQuantity = row.some(cell => {
         const cellLower = cell.toLowerCase();
-        return cellLower.includes('qty') || 
-               cellLower.includes('quantity') ||
-               cellLower.includes('amount') ||
-               cellLower.includes('total') ||
-               cellLower.includes('qty #') ||
-               cellLower.includes('qty#') ||
-               cellLower.includes('quantity #') ||
-               cellLower.includes('quantity#');
+        return cellLower.includes('qty') ||
+          cellLower.includes('quantity') ||
+          cellLower.includes('amount') ||
+          cellLower.includes('total') ||
+          cellLower.includes('qty #') ||
+          cellLower.includes('qty#') ||
+          cellLower.includes('quantity #') ||
+          cellLower.includes('quantity#');
       });
       const indicators = [hasCarton, hasColor, hasQuantity].filter(Boolean);
       if (indicators.length >= 2 && headerRowIdx === -1) {
@@ -201,7 +203,7 @@ export class PackingListProcessor {
       throw new Error('Could not find data table header row. Looking for columns containing "Carton", "Color", "Quantity" or similar terms (case-insensitive).');
     }
     // Extract all data rows below the header
-    const dataRows = allRows.slice(headerRowIdx + 1).filter((row: any) => 
+    const dataRows = allRows.slice(headerRowIdx + 1).filter((row: any) =>
       Array.isArray(row) && row.some((cell: any) => cell !== undefined && cell !== null && cell !== '')
     );
     // Compose as array of objects for easier mapping
@@ -259,13 +261,13 @@ export class PackingListProcessor {
       'PURCHASE ORDER', 'PURCHASEORDER', 'ORDER NO', 'ORDERNO',
       'PO-LINE', 'PO LINE', 'ORDER LINE', 'ORDERLINE'
     ];
-    
+
     for (const key of orderKeys) {
       if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
         return String(row[key]).trim();
       }
     }
-    
+
     // If no exact match, try partial matches (case-insensitive)
     for (const [key, value] of Object.entries(row)) {
       if (value !== undefined && value !== null && value !== '') {
@@ -275,17 +277,17 @@ export class PackingListProcessor {
         }
       }
     }
-    
+
     return 'Unknown';
   }
 
   private performStrictValidation(orderReports: OrderReport[], tkListData: TKListData): ValidationMismatch[] {
     const mismatches: ValidationMismatch[] = [];
-    
+
     // For each order report, compare with original TK List data
     orderReports.forEach(orderReport => {
       const originalOrderData = tkListData.orderGroups[orderReport.orderNumber] || [];
-      
+
       // Compare each row in the generated report with the original data
       // This is a simplified comparison - in practice, you'd need to map the exact cells
       originalOrderData.forEach((originalRow, rowIndex) => {
@@ -294,7 +296,7 @@ export class PackingListProcessor {
           // Find corresponding value in generated report
           // This would need to be implemented based on the actual mapping logic
           const generatedValue = this.findGeneratedValue(orderReport, fieldName, rowIndex);
-          
+
           if (originalValue !== generatedValue) {
             mismatches.push({
               orderNumber: orderReport.orderNumber,
@@ -308,7 +310,7 @@ export class PackingListProcessor {
         });
       });
     });
-    
+
     return mismatches;
   }
 
@@ -317,29 +319,29 @@ export class PackingListProcessor {
     // For now, return a dummy value to demonstrate the structure
     return `Generated_${fieldName}_${rowIndex}`;
   }
-  
+
   private extractAndValidateData(jsonData: Record<string, any>[]): { validData: PackingListRow[], validationLog: ValidationIssue[] } {
     const validData: PackingListRow[] = [];
     const validationLog: ValidationIssue[] = [];
-    
+
     jsonData.forEach((row, index) => {
       // Use your mapped keys here
       const color = row['color'];
       const cartonPoNo = row['cartonPoNo'];
       const totalQty = row['totalQty'] ?? row['totalQty2']; // handle both if needed
-      
+
       // Skip completely empty rows
       if (!color && !cartonPoNo && !totalQty) {
         return;
       }
-      
+
       // Add your validation logic here, or just push all non-empty rows as valid
       validData.push(row as PackingListRow);
     });
-    
+
     return { validData, validationLog };
   }
-  
+
   private generateOrderReports(validData: PackingListRow[], modelNamesByOrder?: Record<string, string>): OrderReport[] {
     // Group data by order number
     const orderGroups = validData.reduce((groups, row) => {
@@ -351,7 +353,7 @@ export class PackingListProcessor {
       groups[orderNumber].push(row);
       return groups;
     }, {} as Record<string, PackingListRow[]>);
-    
+
     // Generate reports for each order
     return Object.entries(orderGroups).map(([orderNumber, data]) => {
       const colorSummary = this.generateColorSummary(data);
@@ -366,7 +368,7 @@ export class PackingListProcessor {
       };
     });
   }
-  
+
   private generateColorSummary(data: PackingListRow[]): ColorSummary[] {
     const colorTotals = data.reduce((totals, row) => {
       const color = row.color || 'Unknown';
@@ -376,7 +378,7 @@ export class PackingListProcessor {
       totals[color] = (totals[color] || 0) + qty;
       return totals;
     }, {} as Record<string, number>);
-    
+
     return Object.entries(colorTotals)
       .map(([color, quantity]) => ({ color, quantity }))
       .sort((a, b) => b.quantity - a.quantity); // Sort by quantity descending

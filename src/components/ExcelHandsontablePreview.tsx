@@ -64,7 +64,7 @@ function fuzzyHeaderMatch(row: string[], expected: string[]): boolean {
 const EXPECTED_HEADER = [
   'CASE NOS', 'SA4 PO NO#', 'CARTON PO NO#', 'SAP STYLE NO', 'STYLE NAME #',
   'S4 Material', 'Material No#', 'COLOR', 'Size', 'Total QTY', 'CARTON',
-  'QTY / CARTON', 'TOTAL QTY', 'N.W / ctn', 'TOTAL N.W.', 'G.W. / ctn',
+  'QTY / CARTON', 'TOTAL QTY', 'N.N.W / ctn', 'TOTAL N.N.W.', 'N.W / ctn', 'TOTAL N.W.', 'G.W. / ctn',
   'TOTAL G.W.', 'MEAS. CM', 'TOTAL CBM'
 ];
 
