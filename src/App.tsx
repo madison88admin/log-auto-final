@@ -132,6 +132,22 @@ function App() {
         ws.getCell('W19').value = 'Total CBM';
         ws.getCell('W19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
+        // --- Extend "Required Shipping Data" yellow header to include Total CBM (N18:W18) ---
+        try {
+          ws.unMergeCells('N18:V18'); // Unmerge old range if exists
+        } catch (e) {
+          // Ignore if not merged
+        }
+        ws.mergeCells('N18:W18'); // Merge to include W column
+        ws.getCell('N18').value = 'Required Shipping Data';
+        ws.getCell('N18').fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFFF00' } // Yellow
+        };
+        ws.getCell('N18').font = { bold: true };
+        ws.getCell('N18').alignment = { horizontal: 'center', vertical: 'middle' };
+
         // --- DYNAMIC MAIN TABLE ROWS AT C20 ---
         const mainTableStart = 20; // C20 is row 20
         const numDataRows = dataRows.length;
@@ -258,14 +274,30 @@ function App() {
           // Output columns in report template
           ws.getCell(`N${rowNum}`).value = safe(row, 10); // N ← K (CARTON / Units/CRT)
           ws.getCell(`O${rowNum}`).value = safe(row, 12); // O ← M (TOTAL QTY / Total Unit)
-          ws.getCell(`P${rowNum}`).value = safe(row, 14); // P ← O (TOTAL N.N.W.)
-          ws.getCell(`Q${rowNum}`).value = safe(row, 16); // Q ← Q (TOTAL N.W. / Net Weight)
-          ws.getCell(`R${rowNum}`).value = safe(row, 18); // R ← S (TOTAL G.W. / Gross Weight)
+          // Set values with 3 decimal format
+          const pCell = ws.getCell(`P${rowNum}`);
+          pCell.value = parseFloat(safe(row, 14)); // P ← O (TOTAL N.N.W.)
+          pCell.numFmt = '0.000';
+
+          const qCell = ws.getCell(`Q${rowNum}`);
+          qCell.value = parseFloat(safe(row, 16)); // Q ← Q (TOTAL N.W. / Net Weight)
+          qCell.numFmt = '0.000';
+
+          const rCell = ws.getCell(`R${rowNum}`);
+          rCell.value = parseFloat(safe(row, 18)); // R ← S (TOTAL G.W. / Gross Weight)
+          rCell.numFmt = '0.000';
+
           ws.getCell(`S${rowNum}`).value = safe(row, 19); // S ← T (Length)
           ws.getCell(`T${rowNum}`).value = safe(row, 20); // T ← U (Width)
           ws.getCell(`U${rowNum}`).value = safe(row, 21); // U ← V (Height)
-          ws.getCell(`V${rowNum}`).value = safe(row, 22); // V ← W (CBM)
-          ws.getCell(`W${rowNum}`).value = safe(row, 22); // W ← W (TOTAL CBM - same as CBM)
+
+          const vCell = ws.getCell(`V${rowNum}`);
+          vCell.value = parseFloat(safe(row, 22)); // V ← W (CBM)
+          vCell.numFmt = '0.000';
+
+          const wCell = ws.getCell(`W${rowNum}`);
+          wCell.value = parseFloat(safe(row, 22)); // W ← W (TOTAL CBM - same as CBM)
+          wCell.numFmt = '0.000';
         });
 
         // 5. Merge Carton# cells for each group in the worksheet
@@ -290,38 +322,43 @@ function App() {
         ws.getCell(`D${summaryStartRow}`).value = 'Summary';
         ws.getCell(`D${summaryStartRow}`).alignment = { horizontal: 'center', vertical: 'middle' };
 
-        // Get the last Carton# entry and process it
-        const lastCartonEntry = dataRows.length > 0 ? safe(dataRows[dataRows.length - 1], idxCaseNos) : '';
-        let processedCartonValue = lastCartonEntry;
-        if (lastCartonEntry && lastCartonEntry.includes('-')) {
-          const parts = lastCartonEntry.split('-');
-          processedCartonValue = parts[parts.length - 1].trim();
-        }
-        console.log(`Last Carton# entry: "${lastCartonEntry}" -> Processed value: "${processedCartonValue}"`);
-
         // Write summary titles in D, values in E
-        // Calculate summary values from the report columns
+        // Calculate summary values from the ORIGINAL dataRows (not from worksheet cells to avoid rounding errors)
+        let totalCarton = 0;
         let totalNetNetWeight = 0;
         let totalNetWeight = 0;
         let totalGrossWeight = 0;
         let totalCBM = 0;
         for (let i = 0; i < numDataRows; i++) {
-          const rowNum = mainTableStart + i;
-          totalNetNetWeight += parseFloat(ws.getCell(`P${rowNum}`).value as string) || 0;
-          totalNetWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
-          totalGrossWeight += parseFloat(ws.getCell(`R${rowNum}`).value as string) || 0;
-          totalCBM += parseFloat(ws.getCell(`W${rowNum}`).value as string) || 0;
+          // Sum from original data
+          // Column 10 = Units/CRT (CARTON), columns 14, 16, 18, 22 for weights and CBM
+          // Round each value to 3 decimals before summing to avoid floating point precision errors
+          totalCarton += Math.round((parseFloat(safe(dataRows[i], 10)) || 0) * 1000) / 1000;
+          totalNetNetWeight += Math.round((parseFloat(safe(dataRows[i], 14)) || 0) * 1000) / 1000;
+          totalNetWeight += Math.round((parseFloat(safe(dataRows[i], 16)) || 0) * 1000) / 1000;
+          totalGrossWeight += Math.round((parseFloat(safe(dataRows[i], 18)) || 0) * 1000) / 1000;
+          totalCBM += Math.round((parseFloat(safe(dataRows[i], 22)) || 0) * 1000) / 1000;
         }
+        // Round final totals to 3 decimals
+        totalCarton = Math.round(totalCarton * 1000) / 1000;
+        totalNetNetWeight = Math.round(totalNetNetWeight * 1000) / 1000;
+        totalNetWeight = Math.round(totalNetWeight * 1000) / 1000;
+        totalGrossWeight = Math.round(totalGrossWeight * 1000) / 1000;
+        totalCBM = Math.round(totalCBM * 1000) / 1000;
         const summaryData = [
-          { title: 'Total Carton', value: processedCartonValue },
-          { title: 'Total Net Net Weight', value: totalNetNetWeight },
-          { title: 'Total Net Weight', value: totalNetWeight },
-          { title: 'Total Gross Weight', value: totalGrossWeight },
-          { title: 'Total CBM', value: parseFloat(totalCBM.toFixed(3)) }
+          { title: 'Total Carton', value: totalCarton, format: '0.000' },
+          { title: 'Total Net Net Weight', value: totalNetNetWeight, format: '0.000' },
+          { title: 'Total Net Weight', value: totalNetWeight, format: '0.000' },
+          { title: 'Total Gross Weight', value: totalGrossWeight, format: '0.000' },
+          { title: 'Total CBM', value: totalCBM, format: '0.000' }
         ];
         summaryData.forEach((item, i) => {
           ws.getCell(`D${summaryStartRow + 1 + i}`).value = item.title;
-          ws.getCell(`E${summaryStartRow + 1 + i}`).value = item.value;
+          const valueCell = ws.getCell(`E${summaryStartRow + 1 + i}`);
+          valueCell.value = item.value;
+          if (item.format) {
+            valueCell.numFmt = item.format;
+          }
         });
 
         // --- COLOR BREAKDOWN FROM GENERATED WORKSHEET ---
@@ -402,42 +439,28 @@ function App() {
         grandTotalCell.style = { font: { bold: true }, alignment: { horizontal: 'center' } };
         grandTotalCell.border = headerBorder;
 
-        // --- ANCHOR IMAGE TO CELL T22 ---
-        // Find and reposition the existing image to anchor it to cell T22
+        // --- REMOVE ALL IMAGES FROM WORKSHEET ---
         try {
-          // Try to get images using different methods
-          console.log('Worksheet object:', ws);
-          console.log('Worksheet properties:', Object.keys(ws));
-
-          // Check if getImages method exists
+          // Remove all images if they exist
           if (typeof ws.getImages === 'function') {
             const images = ws.getImages();
-            console.log('Found images using getImages():', images ? images.length : 0);
-
             if (images && images.length > 0) {
-              console.log('First image:', images[0]);
-              console.log('Image properties:', Object.keys(images[0]));
+              // Clear all images by setting model properties to empty arrays
+              if (ws.model && (ws.model as any).media) {
+                (ws.model as any).media = [];
+              }
             }
-          } else {
-            console.log('getImages() method not available');
           }
-
-          // Alternative: check if images are stored differently
-          // if (ws.images) {
-          //   console.log('ws.images found:', ws.images);
-          // }
-
-          // Alternative: check if images are in the model
-          // if (ws.model && ws.model.images) {
-          //   console.log('ws.model.images found:', ws.model.images);
-          // }
-
+          // Also try to clear via direct property access
+          if ((ws as any)._media) {
+            (ws as any)._media = [];
+          }
+          if ((ws as any)._images) {
+            (ws as any)._images = [];
+          }
         } catch (error) {
-          console.error('Error handling image anchoring:', error);
-          if (error instanceof Error) {
-            console.error('Error stack:', error.stack);
-          }
-          // Continue without image anchoring if there's an error
+          console.error('Error removing images:', error);
+          // Continue even if image removal fails
         }
       })();
       // Export this workbook to a buffer

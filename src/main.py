@@ -185,8 +185,17 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
             break
     # Now merge N18:W18 to include the new column
     ws.merge_cells('N18:W18')
-    # Apply yellow fill to the merged cell
-    ws['N18'].fill = PatternFill(start_color='FFFFFF00', end_color='FFFFFF00', fill_type='solid')
+    # Apply yellow fill and text to the merged cell
+    ws['N18'].value = 'Required Shipping Data'
+    ws['N18'].fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    ws['N18'].font = Font(bold=True)
+    ws['N18'].alignment = Alignment(horizontal='center', vertical='center')
+
+    # Ensure W19 (Total CBM header) exists and is styled
+    if ws['W19'].value is None:
+        ws['W19'].value = 'Total CBM'
+        ws['W19'].font = Font(bold=True)
+        ws['W19'].alignment = Alignment(horizontal='center', vertical='center')
 
     # Main table starts at row 20 (C20)
     main_table_start = 20
@@ -354,27 +363,6 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
     header_cell.font = Font(bold=True)
     header_cell.fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
 
-    # Find the last Carton# value in the data rows
-    carton_col = 3  # C
-    last_carton_cell = ws.cell(row=main_table_start + num_data_rows - 1, column=carton_col).value
-    processed_carton_value = last_carton_cell
-    if last_carton_cell and isinstance(last_carton_cell, str) and '-' in last_carton_cell:
-        parts = last_carton_cell.split('-')
-        processed_carton_value = parts[-1].strip()
-
-    # Sum columns P, Q, V, and N (Units/CRT) for the data rows
-    total_net_weight = 0
-    total_gross_weight = 0
-    total_cbm = 0
-    total_carton = 0  # Sum of Units/CRT (column N)
-    last_units_crt = None
-    for i in range(num_data_rows):
-        row_num = main_table_start + i
-        units_crt_val = ws.cell(row=row_num, column=14).value
-        if units_crt_val not in [None, '', 'nan', 'None', 0, '0']:
-            last_units_crt = units_crt_val
-        total_carton += safe_float(last_units_crt)
-    
     # --- SUMMARY TABLE CALCULATION AND WRITING ---
     main_table_end_row = main_table_start + len(rows) - 1
     # Check if there are any empty cells in column N (14)
@@ -389,26 +377,35 @@ def fill_template_with_data(ws, rows, group_name, model_name=None):
             for row in range(main_table_start, main_table_end_row + 1)
         )
         print('DEBUG: Used direct sum for total_carton')
-    # Sum of Net Net Weight (Column P = 16)
+    # Sum from original row data (not from rounded cell values) to avoid rounding errors
+    # Debug: Print first few row values
+    print(f"DEBUG: First 5 rows totalNnw values: {[row.get('totalNnw') for row in rows[:5]]}")
+    print(f"DEBUG: First 5 rows totalNw values: {[row.get('totalNw') for row in rows[:5]]}")
+    print(f"DEBUG: First 5 rows totalGw values: {[row.get('totalGw') for row in rows[:5]]}")
+    print(f"DEBUG: First 5 rows cbm/totalCbm values: {[row.get('cbm', row.get('totalCbm')) for row in rows[:5]]}")
+
+    # Sum of Net Net Weight (totalNnw from rows)
     total_net_net_weight = sum(
-        safe_float(ws.cell(row=row, column=16).value)
-        for row in range(main_table_start, main_table_end_row + 1)
+        safe_float(row.get('totalNnw', 0))
+        for row in rows
     )
-    # Sum of Net Weight (Column Q = 17)
+    # Sum of Net Weight (totalNw from rows)
     total_net_weight = sum(
-        safe_float(ws.cell(row=row, column=17).value)
-        for row in range(main_table_start, main_table_end_row + 1)
+        safe_float(row.get('totalNw', 0))
+        for row in rows
     )
-    # Sum of Gross Weight (Column R = 18)
+    # Sum of Gross Weight (totalGw from rows)
     total_gross_weight = sum(
-        safe_float(ws.cell(row=row, column=18).value)
-        for row in range(main_table_start, main_table_end_row + 1)
+        safe_float(row.get('totalGw', 0))
+        for row in rows
     )
-    # Sum of Total CBM (Column W = 23)
+    # Sum of Total CBM (cbm or totalCbm from rows)
     total_cbm = sum(
-        safe_float(ws.cell(row=row, column=23).value)
-        for row in range(main_table_start, main_table_end_row + 1)
+        safe_float(row.get('cbm', row.get('totalCbm', 0)))
+        for row in rows
     )
+
+    print(f"DEBUG: Calculated totals - NNW: {total_net_net_weight}, NW: {total_net_weight}, GW: {total_gross_weight}, CBM: {total_cbm}")
 
     # Write summary values (labels and values) below the summary header
     ws.cell(row=summary_start_row+1, column=summary_col, value='Total Carton')
