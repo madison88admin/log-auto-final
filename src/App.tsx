@@ -353,12 +353,14 @@ function App() {
           { title: 'Total CBM', value: totalCBM, format: '0.000' }
         ];
         summaryData.forEach((item, i) => {
-          ws.getCell(`D${summaryStartRow + 1 + i}`).value = item.title;
-          const valueCell = ws.getCell(`E${summaryStartRow + 1 + i}`);
+          const summaryRowNum = summaryStartRow + 1 + i;
+          ws.getCell(`D${summaryRowNum}`).value = item.title;
+          const valueCell = ws.getCell(`E${summaryRowNum}`);
           valueCell.value = item.value;
           if (item.format) {
             valueCell.numFmt = item.format;
           }
+          console.log(`Created summary row ${summaryRowNum}: ${item.title} = ${item.value}`);
         });
 
         // --- COLOR BREAKDOWN FROM GENERATED WORKSHEET ---
@@ -439,6 +441,39 @@ function App() {
         grandTotalCell.style = { font: { bold: true }, alignment: { horizontal: 'center' } };
         grandTotalCell.border = headerBorder;
 
+        // --- CLEAR ANY EXTRA "TOTAL" CELLS BELOW COLOR BREAKDOWN TABLE ---
+        // Clear the specific area where the extra "Total" appears
+        const lastColorBreakdownRow = colorBreakdownStartRow + 1 + colorIdx;
+
+        // First unmerge any cells in the area we want to clear
+        const clearStartRow = lastColorBreakdownRow + 1;
+        const clearEndRow = lastColorBreakdownRow + 3;
+        for (const range of [...ws.model.merges]) {
+          const match = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
+          if (match) {
+            const startRow = parseInt(match[2]);
+            const endRow = parseInt(match[4]);
+            if (startRow >= clearStartRow && endRow <= clearEndRow) {
+              try {
+                ws.unMergeCells(range);
+              } catch (e) {
+                // Ignore unmerge errors
+              }
+            }
+          }
+        }
+
+        // Now clear the cells (including the specific ones that had "Total")
+        // IMPORTANT: Only clear columns F-O (color breakdown), NOT D-E (Summary)
+        for (let clearRow = clearStartRow; clearRow <= clearEndRow; clearRow++) {
+          // Clear columns F to O only (6 to 15), NOT columns D-E where Summary is
+          for (let col = 6; col <= 15; col++) { // F to O
+            const cell = ws.getCell(clearRow, col);
+            cell.value = null;
+            cell.border = {};
+          }
+        }
+
         // --- REMOVE ALL IMAGES FROM WORKSHEET ---
         try {
           // Remove all images if they exist
@@ -517,26 +552,311 @@ function App() {
 
   // Add the handler function if not present
   const handleExportAllAsSingleExcel = async () => {
-    if (!uploadedFile) return;
+    if (!uploadedFile || !reportBuffers || reportBuffers.length === 0) return;
     setIsProcessing(true);
     setError(null);
     try {
-      const formData = new FormData();
-      formData.append('file', uploadedFile);
+      // Create a new workbook to combine all sheets
+      const combinedWb = new ExcelJS.Workbook();
 
-      const response = await fetch('http://localhost:8000/generate-reports/', {
-        method: 'POST',
-        body: formData,
+      // Load each individual report buffer and copy its worksheet to the combined workbook
+      for (let i = 0; i < reportBuffers.length; i++) {
+        const buffer = reportBuffers[i];
+        const sheetName = reportSheetNames[i] || `Sheet${i + 1}`;
+
+        // Load the individual workbook
+        const tempWb = new ExcelJS.Workbook();
+        await tempWb.xlsx.load(buffer);
+        const sourceWs = tempWb.getWorksheet('Report');
+
+        if (sourceWs) {
+          // Create the worksheet from the source worksheet's complete state
+          const targetWs = combinedWb.addWorksheet(sheetName, {
+            views: sourceWs.views,
+            properties: sourceWs.properties as any
+          });
+
+          // Copy column definitions first
+          sourceWs.columns.forEach((column, idx) => {
+            if (column) {
+              const targetCol = targetWs.getColumn(idx + 1);
+              if (column.width) targetCol.width = column.width;
+              if ((column as any).style) targetCol.style = (column as any).style;
+            }
+          });
+
+          // First, determine the actual last row by checking all cells
+          let actualLastRow = 1;
+          sourceWs.eachRow({ includeEmpty: false }, (_row, rowNumber) => {
+            if (rowNumber > actualLastRow) actualLastRow = rowNumber;
+          });
+
+          // Also check for summary rows specifically
+          console.log(`Sheet ${i+1}: Initial actualLastRow = ${actualLastRow}`);
+          for (let checkRow = 1; checkRow <= actualLastRow + 20; checkRow++) {
+            const cellD = sourceWs.getCell(`D${checkRow}`).value;
+            if (cellD) {
+              const cellValue = String(cellD);
+              if (cellValue.includes('Total') || cellValue.includes('Summary')) {
+                console.log(`Sheet ${i+1}: Found at row ${checkRow}: "${cellValue}"`);
+                if (cellValue.includes('Total CBM') || cellValue.includes('Total Gross Weight')) {
+                  if (checkRow > actualLastRow) {
+                    console.log(`Sheet ${i+1}: Extending actualLastRow from ${actualLastRow} to ${checkRow}`);
+                    actualLastRow = checkRow;
+                  }
+                }
+              }
+            }
+          }
+          console.log(`Sheet ${i+1}: Final actualLastRow = ${actualLastRow}`);
+
+          // Copy all rows up to and including the actual last row
+          for (let rowNum = 1; rowNum <= actualLastRow; rowNum++) {
+            const sourceRow = sourceWs.getRow(rowNum);
+            const targetRow = targetWs.getRow(rowNum);
+
+            if (sourceRow.height) targetRow.height = sourceRow.height;
+
+            // Copy all cells in this row (check up to column W = 23)
+            for (let colNum = 1; colNum <= 23; colNum++) {
+              const sourceCell = sourceRow.getCell(colNum);
+              const targetCell = targetRow.getCell(colNum);
+
+              // Copy value and complete style
+              targetCell.value = sourceCell.value;
+              targetCell.style = { ...sourceCell.style };
+            }
+
+            targetRow.commit();
+          }
+
+          // Copy merged cells after all data is in place
+          if (sourceWs.model.merges) {
+            sourceWs.model.merges.forEach((merge: string) => {
+              try {
+                targetWs.mergeCells(merge);
+              } catch (e) {
+                console.log('Could not merge:', merge, e);
+              }
+            });
+          }
+
+          // Add borders to "Ship To" section (F6:J12 based on the screenshot)
+          const mediumBorder = { style: 'medium' as const };
+
+          // Search for the Ship To cell to determine the exact range
+          let shipToFound = false;
+          let shipToStartRow = 6;
+          let shipToEndRow = 12;
+          let shipToStartCol = 6; // F
+          let shipToEndCol = 10; // J
+
+          // Try to find the Ship To cell dynamically
+          for (let row = 3; row <= 15; row++) {
+            for (let col = 5; col <= 11; col++) {
+              const cell = targetWs.getCell(row, col);
+              if (cell.value && String(cell.value).includes('Ship To')) {
+                shipToStartRow = row;
+                shipToStartCol = col;
+                shipToFound = true;
+
+                // Try to find the end of the merged cell
+                if (targetWs.model.merges) {
+                  for (const merge of targetWs.model.merges) {
+                    const match = merge.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
+                    if (match) {
+                      const mStartCol = match[1].charCodeAt(0) - 64;
+                      const mStartRow = parseInt(match[2]);
+                      const mEndCol = match[3].charCodeAt(0) - 64;
+                      const mEndRow = parseInt(match[4]);
+
+                      if (mStartRow === shipToStartRow && mStartCol === shipToStartCol) {
+                        shipToEndRow = mEndRow;
+                        shipToEndCol = mEndCol;
+                        break;
+                      }
+                    }
+                  }
+                }
+                break;
+              }
+            }
+            if (shipToFound) break;
+          }
+
+          // Apply border to the Ship To area
+          // Top border
+          for (let col = shipToStartCol; col <= shipToEndCol; col++) {
+            const cell = targetWs.getCell(shipToStartRow, col);
+            cell.border = { ...cell.border, top: mediumBorder };
+          }
+
+          // Bottom border
+          for (let col = shipToStartCol; col <= shipToEndCol; col++) {
+            const cell = targetWs.getCell(shipToEndRow, col);
+            cell.border = { ...cell.border, bottom: mediumBorder };
+          }
+
+          // Left border
+          for (let row = shipToStartRow; row <= shipToEndRow; row++) {
+            const cell = targetWs.getCell(row, shipToStartCol);
+            cell.border = { ...cell.border, left: mediumBorder };
+          }
+
+          // Right border
+          for (let row = shipToStartRow; row <= shipToEndRow; row++) {
+            const cell = targetWs.getCell(row, shipToEndCol);
+            cell.border = { ...cell.border, right: mediumBorder };
+          }
+
+          // DEBUG: Check what Summary rows exist AFTER copying
+          console.log(`=== Sheet ${i+1} (${sheetName}) - Summary rows AFTER copy ===`);
+          targetWs.eachRow((row, rowNumber) => {
+            const cellD = row.getCell(4).value;
+            if (cellD && String(cellD).includes('Total')) {
+              console.log(`Row ${rowNumber}, Column D: ${cellD}`);
+            }
+          });
+
+          // Add thick outer border to match single export appearance
+          // Find the last row with data - ensure we include all Summary rows
+          let lastRow = 2;
+          targetWs.eachRow({ includeEmpty: false }, (_row, rowNumber) => {
+            if (rowNumber > lastRow) lastRow = rowNumber;
+          });
+
+          // Find the actual last content row by checking both Summary and Color breakdown
+          let lastSummaryRow = 0;
+          let lastColorBreakdownRow = 0;
+
+          targetWs.eachRow((row, rowNumber) => {
+            const cellD = row.getCell(4).value;
+            const cellF = row.getCell(6).value;
+
+            // Check Summary column (D)
+            if (cellD && (String(cellD).includes('Total CBM') || String(cellD).includes('Total Carton') || String(cellD).includes('Total Net') || String(cellD).includes('Total Gross'))) {
+              if (rowNumber > lastSummaryRow) lastSummaryRow = rowNumber;
+            }
+
+            // Check Color breakdown column (F)
+            if (cellF && String(cellF).trim() === 'Total') {
+              if (rowNumber > lastColorBreakdownRow) lastColorBreakdownRow = rowNumber;
+            }
+          });
+
+          // Use the maximum of all detected last rows
+          if (lastSummaryRow > lastRow) lastRow = lastSummaryRow;
+          if (lastColorBreakdownRow > lastRow) lastRow = lastColorBreakdownRow;
+
+          const topRow = 2;
+          const bottomRow = lastRow; // Use exact last row to avoid double border
+          const leftCol = 2; // Column B
+          const rightCol = 23; // Column W
+
+          const thickBorder = { style: 'thick' as const };
+
+          // Apply thick border to all four sides
+          // Top border
+          for (let col = leftCol; col <= rightCol; col++) {
+            const cell = targetWs.getCell(topRow, col);
+            cell.border = { ...cell.border, top: thickBorder };
+          }
+
+          // Bottom border - only apply to cells that have content or are part of the table
+          for (let col = leftCol; col <= rightCol; col++) {
+            const cell = targetWs.getCell(bottomRow, col);
+            // Replace the entire border to avoid double borders
+            const existingBorder = cell.border || {};
+            cell.border = {
+              ...existingBorder,
+              bottom: thickBorder
+            };
+          }
+
+          // Left border
+          for (let row = topRow; row <= bottomRow; row++) {
+            const cell = targetWs.getCell(row, leftCol);
+            cell.border = { ...cell.border, left: thickBorder };
+          }
+
+          // Right border
+          for (let row = topRow; row <= bottomRow; row++) {
+            const cell = targetWs.getCell(row, rightCol);
+            cell.border = { ...cell.border, right: thickBorder };
+          }
+
+          // --- CLEAR EXTRA "TOTAL" CELLS BELOW COLOR BREAKDOWN TABLE ---
+          // Find where Summary starts
+          let summaryRowStart = 0;
+          targetWs.eachRow((row, rowNumber) => {
+            const cellD = row.getCell(4).value;
+            if (cellD && String(cellD).trim() === 'Summary') {
+              summaryRowStart = rowNumber;
+            }
+          });
+
+          // Find the color breakdown Total row (last row of color breakdown)
+          let colorBreakdownTotalRow = 0;
+          if (summaryRowStart > 0) {
+            // Color breakdown starts at summaryRowStart + 1
+            // Find the "Total" row in column F that has numeric data
+            targetWs.eachRow((row, rowNumber) => {
+              if (rowNumber > summaryRowStart) {
+                const cellF = row.getCell(6).value;
+                if (cellF && String(cellF).trim() === 'Total') {
+                  const hasData = row.getCell(7).value && !isNaN(Number(row.getCell(7).value));
+                  if (hasData) {
+                    colorBreakdownTotalRow = rowNumber;
+                  }
+                }
+              }
+            });
+          }
+
+          // Clear rows below color breakdown (but not touching Summary in columns D-E)
+          if (colorBreakdownTotalRow > 0) {
+            const clearStartRow = colorBreakdownTotalRow + 1;
+            const clearEndRow = clearStartRow + 5; // Clear several rows below
+
+            // Unmerge cells in the color breakdown area only
+            for (const range of [...targetWs.model.merges]) {
+              const match = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/);
+              if (match) {
+                const startRow = parseInt(match[2]);
+                const endRow = parseInt(match[4]);
+                const startCol = match[1];
+                // Only unmerge if it's in the color breakdown area (column F onwards)
+                if (startRow >= clearStartRow && endRow <= clearEndRow && startCol >= 'F') {
+                  try {
+                    targetWs.unMergeCells(range);
+                  } catch (e) {}
+                }
+              }
+            }
+
+            // Clear cells in columns F-O only (NOT D-E where Summary is)
+            for (let clearRow = clearStartRow; clearRow <= clearEndRow; clearRow++) {
+              for (let col = 6; col <= 15; col++) { // F to O
+                const cell = targetWs.getCell(clearRow, col);
+                cell.value = null;
+                cell.border = {};
+              }
+            }
+          }
+        }
+      }
+
+      // Generate the combined file
+      const combinedBuffer = await combinedWb.xlsx.writeBuffer();
+      const blob = new Blob([combinedBuffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       });
 
-      if (!response.ok) throw new Error('Failed to generate combined report');
-
-      const blob = await response.blob();
-      // Use uploaded file name + 'Report.xlsx' for the download
       const baseName = (uploadedFile.name || 'Report').replace(/\.xlsx?$/i, '');
       saveAs(blob, `${baseName}Report.xlsx`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred while exporting the combined report');
+      console.error('Export All error:', err);
     } finally {
       setIsProcessing(false);
     }
