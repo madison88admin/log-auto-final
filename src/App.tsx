@@ -18,7 +18,7 @@ function App() {
   const [processingResult, setProcessingResult] = useState<ProcessingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [generatedExcelBuffer, setGeneratedExcelBuffer] = useState<ArrayBuffer | null>(null);
-  const [parsedTables, setParsedTables] = useState<{ table: any[][], modelName: string, mergedCellText?: string }[]>([]);  const [selectedTableIdx, setSelectedTableIdx] = useState(0);
+  const [parsedTables, setParsedTables] = useState<{ table: any[][], modelName: string, mergedCellText?: string }[]>([]); const [selectedTableIdx, setSelectedTableIdx] = useState(0);
   // Add state to store all generated report buffers
   const [reportBuffers, setReportBuffers] = useState<ArrayBuffer[]>([]);
   // Add state to store sheet names for download
@@ -44,7 +44,7 @@ function App() {
       const { table } = parsedTables[t];
       const [headerRow, ...dataRows] = table;
       const idxPoNo = headerRow.indexOf('SA4 PO NO#');
-      let poNo = idxPoNo !== -1 ? String(dataRows[0]?.[idxPoNo] || `Report ${t+1}`) : `Report ${t+1}`;
+      let poNo = idxPoNo !== -1 ? String(dataRows[0]?.[idxPoNo] || `Report ${t + 1}`) : `Report ${t + 1}`;
       let sheetName = poNo.replace(/[\\/?*\[\]:]/g, '_').substring(0, 31);
       let origSheetName = sheetName;
       let suffix = 2;
@@ -80,7 +80,7 @@ function App() {
         let modelName = '';
         for (let i = 0; i < table.length; i++) {
           if (safe(table[i], idxCaseNos) && String(safe(table[i], idxCaseNos)).toLowerCase().includes('case')) {
-            modelName = safe(table[i-2], idxCaseNos);
+            modelName = safe(table[i - 2], idxCaseNos);
             break;
           }
         }
@@ -99,6 +99,38 @@ function App() {
         // Model Name (E16) remains as before
         ws.getCell('E16').value = modelName;
         ws.getCell('E7').value = '';
+
+        // --- UPDATE TEMPLATE HEADERS TO INCLUDE NEW N.N.W. COLUMN ---
+        // The template header row is at row 19
+        // Shift all headers from P onwards to the right, then insert new N.N.W. header
+        ws.getCell('P19').value = 'TOTAL\nN.N.W.';
+        ws.getCell('P19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        ws.getCell('Q19').value = 'Net Weight';
+        ws.getCell('Q19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        ws.getCell('R19').value = 'Gross Weight';
+        ws.getCell('R19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+
+        // Carton Size spans S19:U19 (merged)
+        // First unmerge if already merged to avoid conflicts
+        try {
+          ws.unMergeCells('S19:U19');
+        } catch (e) {
+          // Ignore if not merged
+        }
+        // Also check for the old template merge (R19:T19) and unmerge it
+        try {
+          ws.unMergeCells('R19:T19');
+        } catch (e) {
+          // Ignore if not merged
+        }
+        ws.mergeCells('S19:U19');
+        ws.getCell('S19').value = 'Carton Size';
+        ws.getCell('S19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+
+        ws.getCell('V19').value = 'CBM';
+        ws.getCell('V19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        ws.getCell('W19').value = 'Total CBM';
+        ws.getCell('W19').alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
         // --- DYNAMIC MAIN TABLE ROWS AT C20 ---
         const mainTableStart = 20; // C20 is row 20
@@ -125,7 +157,7 @@ function App() {
 
         // 3. Write rows using propagated carton number for split-carton logic
         // For merging: track start/end row for each carton group
-        const cartonRowRanges: Record<string, {start: number, end: number}> = {};
+        const cartonRowRanges: Record<string, { start: number, end: number }> = {};
         effectiveCartonNos.forEach((cartonNo, i) => {
           const rowNum = mainTableStart + i;
           if (!(cartonNo in cartonRowRanges)) {
@@ -222,32 +254,33 @@ function App() {
           });
 
           // Map report columns to uploaded file columns by letter
-          // A=0, B=1, ..., L=11, M=12, N=13, O=14, P=15, Q=16, R=17, S=18, T=19, U=20
-          // ws.getCell(`G${rowNum}`).value = safe(row, 11); // G = L (replaced by split-carton logic above)
-          ws.getCell(`N${rowNum}`).value = safe(row, 10); // N = K
-          ws.getCell(`O${rowNum}`).value = safe(row, 12); // O = M
-          ws.getCell(`P${rowNum}`).value = safe(row, 14); // P = O
-          ws.getCell(`Q${rowNum}`).value = safe(row, 16); // Q = Q
-          ws.getCell(`R${rowNum}`).value = safe(row, 17); // R = R
-          ws.getCell(`S${rowNum}`).value = safe(row, 18); // S = S
-          ws.getCell(`T${rowNum}`).value = safe(row, 19); // T = T
-          ws.getCell(`U${rowNum}`).value = safe(row, 20); // U = U
-          ws.getCell(`V${rowNum}`).value = safe(row, 20); // V = U
+          // Input file structure: K=10(CARTON), L=11, M=12(TOTAL QTY), N=13(N.N.W/ctn), O=14(TOTAL N.N.W.), P=15(N.W/ctn), Q=16(TOTAL N.W.), R=17(G.W./ctn), S=18(TOTAL G.W.), T=19, U=20, V=21
+          // Output columns in report template
+          ws.getCell(`N${rowNum}`).value = safe(row, 10); // N ← K (CARTON / Units/CRT)
+          ws.getCell(`O${rowNum}`).value = safe(row, 12); // O ← M (TOTAL QTY / Total Unit)
+          ws.getCell(`P${rowNum}`).value = safe(row, 14); // P ← O (TOTAL N.N.W.)
+          ws.getCell(`Q${rowNum}`).value = safe(row, 16); // Q ← Q (TOTAL N.W. / Net Weight)
+          ws.getCell(`R${rowNum}`).value = safe(row, 18); // R ← S (TOTAL G.W. / Gross Weight)
+          ws.getCell(`S${rowNum}`).value = safe(row, 19); // S ← T (Length)
+          ws.getCell(`T${rowNum}`).value = safe(row, 20); // T ← U (Width)
+          ws.getCell(`U${rowNum}`).value = safe(row, 21); // U ← V (Height)
+          ws.getCell(`V${rowNum}`).value = safe(row, 22); // V ← W (CBM)
+          ws.getCell(`W${rowNum}`).value = safe(row, 22); // W ← W (TOTAL CBM - same as CBM)
         });
 
         // 5. Merge Carton# cells for each group in the worksheet
-        Object.values(cartonRowRanges).forEach(({start, end}) => {
+        Object.values(cartonRowRanges).forEach(({ start, end }) => {
           if (end > start) {
             ws.mergeCells(`C${start}:C${end}`);
-            // Also merge columns N–V for this group
-            const colLetters = ['N','O','P','Q','R','S','T','U','V'];
+            // Also merge columns N–W for this group (skip N for carton count)
+            const colLetters = ['O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W'];
             colLetters.forEach(col => {
               ws.mergeCells(`${col}${start}:${col}${end}`);
             });
           }
         });
 
-        
+
 
         // --- SUMMARY AND COLOR BREAKDOWN ---
         // Move summary and color breakdown to start 1 row below the last data row
@@ -268,17 +301,20 @@ function App() {
 
         // Write summary titles in D, values in E
         // Calculate summary values from the report columns
+        let totalNetNetWeight = 0;
         let totalNetWeight = 0;
         let totalGrossWeight = 0;
         let totalCBM = 0;
         for (let i = 0; i < numDataRows; i++) {
           const rowNum = mainTableStart + i;
-          totalNetWeight += parseFloat(ws.getCell(`P${rowNum}`).value as string) || 0;
-          totalGrossWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
-          totalCBM += parseFloat(ws.getCell(`V${rowNum}`).value as string) || 0;
+          totalNetNetWeight += parseFloat(ws.getCell(`P${rowNum}`).value as string) || 0;
+          totalNetWeight += parseFloat(ws.getCell(`Q${rowNum}`).value as string) || 0;
+          totalGrossWeight += parseFloat(ws.getCell(`R${rowNum}`).value as string) || 0;
+          totalCBM += parseFloat(ws.getCell(`W${rowNum}`).value as string) || 0;
         }
         const summaryData = [
           { title: 'Total Carton', value: processedCartonValue },
+          { title: 'Total Net Net Weight', value: totalNetNetWeight },
           { title: 'Total Net Weight', value: totalNetWeight },
           { title: 'Total Gross Weight', value: totalGrossWeight },
           { title: 'Total CBM', value: parseFloat(totalCBM.toFixed(3)) }
@@ -297,7 +333,7 @@ function App() {
           const rowNum = mainTableStart + i;
           const color = ws.getCell(`D${rowNum}`).value?.toString().trim() || '';
           if (!color) continue;
-          if (!colorMap[color]) colorMap[color] = [0,0,0,0,0,0,0];
+          if (!colorMap[color]) colorMap[color] = [0, 0, 0, 0, 0, 0, 0];
           const cartonNo = effectiveCartonNos[i];
           // OS column (index 0): use split carton logic
           if (cartonNo && cartonCountMap[cartonNo] > 1) {
@@ -372,12 +408,12 @@ function App() {
           // Try to get images using different methods
           console.log('Worksheet object:', ws);
           console.log('Worksheet properties:', Object.keys(ws));
-          
+
           // Check if getImages method exists
           if (typeof ws.getImages === 'function') {
             const images = ws.getImages();
             console.log('Found images using getImages():', images ? images.length : 0);
-            
+
             if (images && images.length > 0) {
               console.log('First image:', images[0]);
               console.log('Image properties:', Object.keys(images[0]));
@@ -385,17 +421,17 @@ function App() {
           } else {
             console.log('getImages() method not available');
           }
-          
+
           // Alternative: check if images are stored differently
           // if (ws.images) {
           //   console.log('ws.images found:', ws.images);
           // }
-          
+
           // Alternative: check if images are in the model
           // if (ws.model && ws.model.images) {
           //   console.log('ws.model.images found:', ws.model.images);
           // }
-          
+
         } catch (error) {
           console.error('Error handling image anchoring:', error);
           if (error instanceof Error) {
@@ -493,7 +529,7 @@ function App() {
             <h2 className="text-xl font-semibold text-gray-900 mb-4">
               Upload TK List
             </h2>
-            <FileUpload 
+            <FileUpload
               onFileUpload={handleFileUpload}
               uploadedFile={uploadedFile}
               disabled={isProcessing}
@@ -573,10 +609,10 @@ function App() {
                       gap: 12,
                     }}>
                       <span style={{ display: 'flex', alignItems: 'center', marginRight: 8 }}>
-                        <svg width="20" height="20" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24" style={{ marginRight: 6 }}><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h5"/></svg>
-                        <b style={{ fontWeight: 600, color: '#2563eb', fontSize: 15 }}>Ship to:</b>
+                        <svg width="20" height="20" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24" style={{ marginRight: 6 }}><rect x="4" y="4" width="16" height="16" rx="4" /><path d="M8 9h8M8 13h5" /></svg>
+                        <b style={{ color: '#2563eb', fontSize: 15 }}>Ship to:</b>
                       </span>
-                      <span style={{ flex: 1, fontWeight: 500 }}>{mergedCellText}</span>
+                      <span style={{ flex: 1 }}>{mergedCellText}</span>
                     </div>
                   )}
                   {reportBuffers[selectedTableIdx] && (
@@ -650,11 +686,11 @@ function App() {
           {/* Results */}
           {processingResult && (
             <>
-              <ReportResults 
+              <ReportResults
                 result={processingResult}
                 onReset={handleReset}
               />
-              <ValidationResults 
+              <ValidationResults
                 validationLog={processingResult.validationLog}
               />
               <StrictValidationResults
